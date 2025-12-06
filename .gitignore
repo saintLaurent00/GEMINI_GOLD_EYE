@@ -1,0 +1,14 @@
+# Sécurité : Ne jamais envoyer les clés API
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Dossiers temporaires
+charts_buffer/
+logs/
+
+# Environnement virtuel
+venv/
+.venv/
