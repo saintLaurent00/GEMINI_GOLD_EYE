@@ -521,45 +521,228 @@
 
 
 
+# import time
+# import datetime
+# import MetaTrader5 as mt5
+# from config import settings
+# from infrastructure.mt5_connector import MT5Connector
+# from data_processor.indicators import TacticalCalculator # Pour l'ATR frais
+# from core.strategy import GeminiStrategy
+# from core.risk_manager import RiskManager
+# from core.trade_manager import TradeManager
+
+# # --- CONFIGURATION HORAIRE PROP FIRM (GMT/Abidjan) ---
+# # Le bot ne prend des NOUVEAUX trades qu'entre ces heures.
+# # 08h00 : Ouverture Londres (Liquidité max)
+# # 20h00 : Clôture New York (On arrête avant les spreads de nuit)
+# TRADING_START_HOUR = 8   
+# TRADING_END_HOUR = 20    
+
+# def is_trading_hours():
+#     """
+#     Vérifie si on est dans la fenêtre de tir (Heure UTC/GMT).
+#     Comme la Côte d'Ivoire est GMT+0, cela correspond à ton heure locale.
+#     """
+#     current_hour = datetime.datetime.now(datetime.timezone.utc).hour
+#     is_open = TRADING_START_HOUR <= current_hour < TRADING_END_HOUR
+    
+#     # Petit log toutes les 5 minutes si le marché est fermé pour rassurer l'utilisateur
+#     if not is_open and int(time.time()) % 300 == 0:
+#         print(f"💤 Marché OFF (Heure: {current_hour}h). Gestion positions active, mais pas de nouveaux trades.")
+            
+#     return is_open
+
+# def has_open_position(symbol):
+#     """Vérifie si une position est déjà ouverte sur ce symbole pour éviter le stacking."""
+#     positions = mt5.positions_get(symbol=symbol)
+#     if positions is None: return False
+#     return len(positions) > 0
+
+# def get_last_candle_time(symbol, timeframe):
+#     """Récupère l'heure d'ouverture de la bougie actuelle pour détecter la clôture."""
+#     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+#     if rates is None or len(rates) == 0: return 0
+#     return int(rates[0]['time'])
+
+# def main():
+#     print("💎 --- GEMINI GOLD EYE V13 : PROP FIRM KILLER --- 💎")
+#     print(f"🌍 Zone : Côte d'Ivoire (GMT+0)")
+#     print(f"⏰ Chasse : {TRADING_START_HOUR}h00 - {TRADING_END_HOUR}h00")
+    
+#     # 1. CONNEXION INFRASTRUCTURE
+#     connector = MT5Connector()
+#     if not connector.start():
+#         return
+
+#     # 2. CHARGEMENT DES CERVEAUX
+#     brain = GeminiStrategy()
+#     risk_manager = RiskManager()
+#     trade_manager = TradeManager() # Le Berger (Trailing/BE)
+
+#     # 3. MÉMOIRE DES BOUGIES (Sync H4)
+#     # On stocke l'heure de la dernière bougie connue pour ne pas analyser 2 fois la même
+#     last_candle_memory = {}
+    
+#     # Initialisation
+#     print("⏳ Synchronisation des bougies H4...")
+#     for sym in settings.SYMBOLS:
+#         last_candle_memory[sym] = get_last_candle_time(sym, settings.TIMEFRAME_TRIGGER)
+
+#     print("🤖 SYSTÈME ARMÉ ET PRÊT.")
+
+#     # BOUCLE PRINCIPALE INFINIE
+#     while True:
+#         try:
+#             # ==========================================
+#             # TÂCHE 1 : GESTION DES POSITIONS (Priorité Absolue)
+#             # ==========================================
+#             # S'exécute à chaque seconde. C'est ici que le Trailing Stop et le BE travaillent.
+#             # Même la nuit, on gère les trades ouverts.
+#             trade_manager.manage_existing_positions()
+
+#             # ==========================================
+#             # TÂCHE 2 : ANALYSE IA (Conditionnelle)
+#             # ==========================================
+            
+#             # On ne scanne pour de nouvelles opportunités que si c'est l'heure
+#             if is_trading_hours():
+                
+#                 for symbol in settings.SYMBOLS:
+#                     # A. Détection Nouvelle Bougie H4
+#                     # On compare l'heure de la bougie actuelle avec celle en mémoire
+#                     current_candle_time = get_last_candle_time(symbol, settings.TIMEFRAME_TRIGGER)
+                    
+#                     if current_candle_time != last_candle_memory.get(symbol, 0):
+                        
+#                         now_str = datetime.datetime.now().strftime('%H:%M')
+#                         print(f"\n🕯️ NOUVELLE BOUGIE H4 sur {symbol} à {now_str}")
+                        
+#                         # Mise à jour mémoire immédiate
+#                         last_candle_memory[symbol] = current_candle_time
+
+#                         # B. Filtres de Sécurité (Prop Firm Rules)
+#                         if has_open_position(symbol):
+#                             print(f"🔒 Position déjà en cours. On laisse le Trade Manager gérer.")
+#                             continue
+
+#                         if not risk_manager.check_execution_criteria(symbol):
+#                             print(f"⛔ Critères exécution non remplis (Spread/Marge).")
+#                             continue
+
+#                         # C. Appel à l'Intelligence Artificielle
+#                         decision = brain.analyze_symbol(symbol)
+                        
+#                         # D. Exécution de la Décision
+#                         if decision and decision['decision'] in ["BUY", "SELL"]:
+#                             confidence = decision.get('confidence', 0)
+                            
+#                             # Seuil de confiance élevé pour Prop Firm
+#                             if confidence >= 75:
+#                                 print(f"✅ SIGNAL VALIDÉ ({confidence}%) -> PRÉPARATION...")
+                                
+#                                 # E. Recalcul Mathématique (Double Check)
+#                                 # On récupère l'ATR frais pour le SL
+#                                 calc = TacticalCalculator(symbol)
+#                                 bulletin = calc.get_bulletin()
+                                
+#                                 if bulletin:
+#                                     real_atr = bulletin['TECHNICAL_INDICATORS']['ATR_14']
+                                    
+#                                     # Récupération du multiplicateur (défaut 2.0 pour laisser respirer)
+#                                     sl_multiplier = decision.get("sl_atr_multiplier", 2.0)
+                                    
+#                                     # Calcul Distance SL en PRIX
+#                                     sl_dist_price = real_atr * sl_multiplier
+                                    
+#                                     # Calcul du Lot (Risque Management Strict 1%)
+#                                     lot = risk_manager.calculate_lot_size(symbol, sl_dist_price)
+                                    
+#                                     print(f"📐 Calibration: ATR={real_atr:.5f} | SL={sl_dist_price:.5f} | LOT={lot}")
+                                    
+#                                     # Tir final
+#                                     trade_manager.place_trade(symbol, decision, lot, sl_dist_price)
+#                                 else:
+#                                     print("❌ Erreur critique : Impossible de calculer l'ATR.")
+#                             else:
+#                                 print(f"✋ Confiance trop faible ({confidence}%). On attend mieux.")
+            
+#             # ==========================================
+#             # PAUSE CPU
+#             # ==========================================
+#             time.sleep(1)
+
+#         except KeyboardInterrupt:
+#             print("\n🛑 ARRÊT MANUEL DU BOT.")
+#             break
+#         except Exception as e:
+#             print(f"❌ ERREUR BOUCLE PRINCIPALE : {e}")
+#             time.sleep(5) # Petite pause de sécurité en cas de crash
+
+#     connector.shutdown()
+
+# if __name__ == "__main__":
+#     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import time
 import datetime
 import MetaTrader5 as mt5
 from config import settings
 from infrastructure.mt5_connector import MT5Connector
-from data_processor.indicators import TacticalCalculator # Pour l'ATR frais
+from data_processor.indicators import TacticalCalculator
 from core.strategy import GeminiStrategy
 from core.risk_manager import RiskManager
 from core.trade_manager import TradeManager
 
 # --- CONFIGURATION HORAIRE PROP FIRM (GMT/Abidjan) ---
-# Le bot ne prend des NOUVEAUX trades qu'entre ces heures.
-# 08h00 : Ouverture Londres (Liquidité max)
-# 20h00 : Clôture New York (On arrête avant les spreads de nuit)
 TRADING_START_HOUR = 8   
 TRADING_END_HOUR = 20    
 
 def is_trading_hours():
-    """
-    Vérifie si on est dans la fenêtre de tir (Heure UTC/GMT).
-    Comme la Côte d'Ivoire est GMT+0, cela correspond à ton heure locale.
-    """
+    """Vérifie l'heure pour les NOUVEAUX trades (08h-20h)."""
     current_hour = datetime.datetime.now(datetime.timezone.utc).hour
-    is_open = TRADING_START_HOUR <= current_hour < TRADING_END_HOUR
+    return TRADING_START_HOUR <= current_hour < TRADING_END_HOUR
+
+def is_market_open_for_management():
+    """
+    Vérifie si le marché Forex est ouvert pour la GESTION (Trailing Stop).
+    Fermé le Samedi toute la journée et le Dimanche jusqu'à 21h GMT.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day = now.weekday() # 0=Lundi ... 5=Samedi, 6=Dimanche
+    hour = now.hour
+
+    # Si Samedi (5) : FERMÉ
+    if day == 5: return False
     
-    # Petit log toutes les 5 minutes si le marché est fermé pour rassurer l'utilisateur
-    if not is_open and int(time.time()) % 300 == 0:
-        print(f"💤 Marché OFF (Heure: {current_hour}h). Gestion positions active, mais pas de nouveaux trades.")
-            
-    return is_open
+    # Si Dimanche (6) et avant 22h00 GMT : FERMÉ (Pré-ouverture Asie)
+    if day == 6 and hour < 22: return False
+    
+    # Le reste du temps (Lundi -> Vendredi soir) : OUVERT
+    return True
 
 def has_open_position(symbol):
-    """Vérifie si une position est déjà ouverte sur ce symbole pour éviter le stacking."""
     positions = mt5.positions_get(symbol=symbol)
     if positions is None: return False
     return len(positions) > 0
 
 def get_last_candle_time(symbol, timeframe):
-    """Récupère l'heure d'ouverture de la bougie actuelle pour détecter la clôture."""
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
     if rates is None or len(rates) == 0: return 0
     return int(rates[0]['time'])
@@ -569,114 +752,86 @@ def main():
     print(f"🌍 Zone : Côte d'Ivoire (GMT+0)")
     print(f"⏰ Chasse : {TRADING_START_HOUR}h00 - {TRADING_END_HOUR}h00")
     
-    # 1. CONNEXION INFRASTRUCTURE
+    # 1. CONNEXION
     connector = MT5Connector()
-    if not connector.start():
-        return
+    if not connector.start(): return
 
-    # 2. CHARGEMENT DES CERVEAUX
+    # 2. MODULES
     brain = GeminiStrategy()
     risk_manager = RiskManager()
-    trade_manager = TradeManager() # Le Berger (Trailing/BE)
+    trade_manager = TradeManager()
 
-    # 3. MÉMOIRE DES BOUGIES (Sync H4)
-    # On stocke l'heure de la dernière bougie connue pour ne pas analyser 2 fois la même
+    # 3. INIT MÉMOIRE
     last_candle_memory = {}
-    
-    # Initialisation
     print("⏳ Synchronisation des bougies H4...")
     for sym in settings.SYMBOLS:
         last_candle_memory[sym] = get_last_candle_time(sym, settings.TIMEFRAME_TRIGGER)
 
-    print("🤖 SYSTÈME ARMÉ ET PRÊT.")
+    print("🤖 SYSTÈME ARMÉ.")
 
-    # BOUCLE PRINCIPALE INFINIE
+    # BOUCLE PRINCIPALE
     while True:
         try:
             # ==========================================
-            # TÂCHE 1 : GESTION DES POSITIONS (Priorité Absolue)
+            # TÂCHE 1 : GESTION DES POSITIONS (Si Marché Ouvert)
             # ==========================================
-            # S'exécute à chaque seconde. C'est ici que le Trailing Stop et le BE travaillent.
-            # Même la nuit, on gère les trades ouverts.
-            trade_manager.manage_existing_positions()
+            # On ne tente de bouger les SL que si le Forex est ouvert
+            if is_market_open_for_management():
+                trade_manager.manage_existing_positions()
+            else:
+                # Petit log discret toutes les 5 min pour dire qu'on dort
+                if int(time.time()) % 300 == 0:
+                    print("💤 Week-end : Marché fermé. Le Bot se repose.")
 
             # ==========================================
-            # TÂCHE 2 : ANALYSE IA (Conditionnelle)
+            # TÂCHE 2 : ANALYSE IA (Si Heures de Bureau)
             # ==========================================
-            
-            # On ne scanne pour de nouvelles opportunités que si c'est l'heure
-            if is_trading_hours():
+            if is_trading_hours() and is_market_open_for_management():
                 
                 for symbol in settings.SYMBOLS:
-                    # A. Détection Nouvelle Bougie H4
-                    # On compare l'heure de la bougie actuelle avec celle en mémoire
                     current_candle_time = get_last_candle_time(symbol, settings.TIMEFRAME_TRIGGER)
                     
                     if current_candle_time != last_candle_memory.get(symbol, 0):
-                        
                         now_str = datetime.datetime.now().strftime('%H:%M')
                         print(f"\n🕯️ NOUVELLE BOUGIE H4 sur {symbol} à {now_str}")
-                        
-                        # Mise à jour mémoire immédiate
                         last_candle_memory[symbol] = current_candle_time
 
-                        # B. Filtres de Sécurité (Prop Firm Rules)
                         if has_open_position(symbol):
-                            print(f"🔒 Position déjà en cours. On laisse le Trade Manager gérer.")
+                            print(f"🔒 Position en cours. Skip.")
                             continue
 
                         if not risk_manager.check_execution_criteria(symbol):
-                            print(f"⛔ Critères exécution non remplis (Spread/Marge).")
                             continue
 
-                        # C. Appel à l'Intelligence Artificielle
+                        # Appel IA
                         decision = brain.analyze_symbol(symbol)
                         
-                        # D. Exécution de la Décision
                         if decision and decision['decision'] in ["BUY", "SELL"]:
                             confidence = decision.get('confidence', 0)
-                            
-                            # Seuil de confiance élevé pour Prop Firm
                             if confidence >= 75:
-                                print(f"✅ SIGNAL VALIDÉ ({confidence}%) -> PRÉPARATION...")
+                                print(f"✅ SIGNAL {confidence}% DETECTÉ...")
                                 
-                                # E. Recalcul Mathématique (Double Check)
-                                # On récupère l'ATR frais pour le SL
+                                # Recalcul ATR
                                 calc = TacticalCalculator(symbol)
                                 bulletin = calc.get_bulletin()
                                 
                                 if bulletin:
                                     real_atr = bulletin['TECHNICAL_INDICATORS']['ATR_14']
-                                    
-                                    # Récupération du multiplicateur (défaut 2.0 pour laisser respirer)
                                     sl_multiplier = decision.get("sl_atr_multiplier", 2.0)
-                                    
-                                    # Calcul Distance SL en PRIX
                                     sl_dist_price = real_atr * sl_multiplier
-                                    
-                                    # Calcul du Lot (Risque Management Strict 1%)
                                     lot = risk_manager.calculate_lot_size(symbol, sl_dist_price)
                                     
-                                    print(f"📐 Calibration: ATR={real_atr:.5f} | SL={sl_dist_price:.5f} | LOT={lot}")
-                                    
-                                    # Tir final
+                                    print(f"📐 ATR={real_atr:.5f} | SL={sl_dist_price:.5f} | LOT={lot}")
                                     trade_manager.place_trade(symbol, decision, lot, sl_dist_price)
-                                else:
-                                    print("❌ Erreur critique : Impossible de calculer l'ATR.")
-                            else:
-                                print(f"✋ Confiance trop faible ({confidence}%). On attend mieux.")
             
-            # ==========================================
-            # PAUSE CPU
-            # ==========================================
             time.sleep(1)
 
         except KeyboardInterrupt:
-            print("\n🛑 ARRÊT MANUEL DU BOT.")
+            print("\n🛑 ARRÊT MANUEL.")
             break
         except Exception as e:
-            print(f"❌ ERREUR BOUCLE PRINCIPALE : {e}")
-            time.sleep(5) # Petite pause de sécurité en cas de crash
+            print(f"❌ ERREUR : {e}")
+            time.sleep(5)
 
     connector.shutdown()
 
