@@ -495,10 +495,10 @@ RULES OF ENGAGEMENT V13 (H1 SNIPER EDITION)
 ------------------------------------------------------
 
 1. MULTI-TIMEFRAME ALIGNMENT (CRITICAL):
-- Look at the JSON field "H4_METRICS" -> "Alignment_H1_H4".
-- IF "CONFLICT" => IMMEDIATE WAIT. Do not trade against the H4 trend.
-- BUY only if H1 Bullish AND H4 Bullish.
-- SELL only if H1 Bearish AND H4 Bearish.
+- Look at the JSON field "H1_INDICATORS" and "H4_STRUCTURE".
+- IF H1 Trend and H4 Trend_EMA200 conflict => IMMEDIATE WAIT. Do not trade against the H4 trend.
+- BUY only if H1 Trend is BULLISH AND H4 Trend_EMA200 is BULLISH.
+- SELL only if H1 Trend is BEARISH AND H4 Trend_EMA200 is BEARISH.
 
 2. SMC ENTRY PATTERN (ON H1):
 - We do NOT enter on random candles.
@@ -507,7 +507,7 @@ RULES OF ENGAGEMENT V13 (H1 SNIPER EDITION)
 - Confirmation: Look for a Pin Bar or Engulfing candle on H1 during the retest.
 
 3. RANGE & MOMENTUM FILTER:
-- Check "H1_METRICS" -> "RSI". If > 70 or < 30, be careful of reversal (WAIT).
+- Check "H1_INDICATORS" -> "RSI". If > 70 or < 30, be careful of reversal (WAIT).
 - If H4 candles are flat/overlapping (Range) => WAIT.
 - Never enter a direct breakout (Parabolic move). Always wait for the pullback.
 
@@ -517,7 +517,7 @@ RULES OF ENGAGEMENT V13 (H1 SNIPER EDITION)
 - If spread is high (> 40 points in JSON) => WAIT.
 
 5. VOLATILITY PROTECTION:
-- Use the "ATR" from H1 Metrics to gauge current volatility.
+- Use the "ATR" from H1_INDICATORS to gauge current volatility.
 - If price is too far from EMA50 H1 (Overextended) => WAIT.
 
 ------------------------------------------------------
@@ -554,8 +554,8 @@ Response Format:
             # --- EXTRACTION INTELLIGENTE DE L'ATR ---
             # Le RiskManager a besoin de l'ATR pour calculer le lot.
             # On prend celui du H1 (Trigger) car le SL est basé sur le H1.
-            if "H1_METRICS (TRIGGER)" in bulletin:
-                decision["atr_value"] = bulletin["H1_METRICS (TRIGGER)"]["ATR"]
+            if "H1_INDICATORS" in bulletin:
+                decision["atr_value"] = bulletin["H1_INDICATORS"].get("ATR", 0.0010)
             else:
                 # Fallback au cas où le bulletin est mal formé
                 decision["atr_value"] = 0.0010 
