@@ -147,6 +147,18 @@ TRAILING_DIST=300
 python main.py
 ```
 
+### 5. Backtester le bot
+
+Un moteur de backtest local est disponible sans appel Gemini obligatoire. Il reproduit le bulletin H1/H4 du live, applique une décision de confluence déterministe, simule SL/TP/BE/trailing et exporte un CSV.
+
+```
+python backtest.py --demo --bars 700
+python backtest.py --csv data/EURUSD_H1.csv --symbol EURUSD
+python backtest.py --mt5 --symbol XAUUSD --bars 2000
+```
+
+Le CSV doit contenir au minimum : `time, open, high, low, close`.
+
 ---
 
 ##  Actifs Optimisés
