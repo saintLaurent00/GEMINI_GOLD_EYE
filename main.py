@@ -646,7 +646,7 @@
 #                                 bulletin = calc.get_bulletin()
                                 
 #                                 if bulletin:
-#                                     real_atr = bulletin['TECHNICAL_INDICATORS']['ATR_14']
+#                                     real_atr = bulletin.get('H1_INDICATORS', {}).get('ATR', decision.get('atr_value', 0.0010))
                                     
 #                                     # Récupération du multiplicateur (défaut 2.0 pour laisser respirer)
 #                                     sl_multiplier = decision.get("sl_atr_multiplier", 2.0)
@@ -816,7 +816,7 @@ def main():
                                 bulletin = calc.get_bulletin()
                                 
                                 if bulletin:
-                                    real_atr = bulletin['TECHNICAL_INDICATORS']['ATR_14']
+                                    real_atr = bulletin.get('H1_INDICATORS', {}).get('ATR', decision.get('atr_value', 0.0010))
                                     sl_multiplier = decision.get("sl_atr_multiplier", 2.0)
                                     sl_dist_price = real_atr * sl_multiplier
                                     lot = risk_manager.calculate_lot_size(symbol, sl_dist_price)
