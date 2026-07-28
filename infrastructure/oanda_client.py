@@ -64,6 +64,10 @@ class OandaClient:
     # --------------------------------------------------------
     # Données & compte
     # --------------------------------------------------------
+    def list_accounts(self):
+        """Liste tous les comptes accessibles avec ce token (pour trouver son Account ID)."""
+        return self._get("/v3/accounts").get("accounts", [])
+
     def account(self):
         return self._get(f"/v3/accounts/{self.account_id}")["account"]
 
