@@ -242,7 +242,7 @@ def run(symbol, ticker, config, rounds, interval, gemini_every):
           f"Gemini tous les {gemini_every} cycles\n")
 
     for r in range(1, rounds + 1):
-        now = datetime.datetime.utcnow().strftime("%H:%M")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M")
         try:
             h1 = fetch_df(ticker, "H1")
         except Exception as e:
@@ -253,6 +253,7 @@ def run(symbol, ticker, config, rounds, interval, gemini_every):
             time.sleep(interval); continue
         row = h1.iloc[last_closed_idx]
         price = float(row["close"])
+        state["last_price"] = price
         atr = float(row["ATR"]) if pd.notna(row.get("ATR")) else 0.0
 
         # 1) gestion position ouverte
@@ -292,6 +293,16 @@ def run(symbol, ticker, config, rounds, interval, gemini_every):
                 else:
                     print(f"  ⏸️ {verdict} (conf {conf}% < 75 ou WAIT)")
         time.sleep(interval)
+
+    # Cloture mark-to-market de la position encore ouverte (pour le bilan)
+    if state["pos"] and not state["pos"].closed and "last_price" in state:
+        pos = state["pos"]
+        rfun = (lambda p: (p - pos.entry) / pos.risk) if pos.side == "BUY" else (lambda p: (pos.entry - p) / pos.risk)
+        half = config.partial_ratio
+        pnl = (half * config.tp1_r + (1 - half) * rfun(state["last_price"])) if pos.partial else rfun(state["last_price"])
+        state["balance"] += state["balance"] * config.risk_percent / 100 * pnl
+        state["trades"].append(pnl)
+        print(f"  ↪ Cloture fin de session @ {state['last_price']:.5f}: {pnl:+.2f}R | solde {state['balance']:.2f}")
 
     # bilan
     t = state["trades"]
