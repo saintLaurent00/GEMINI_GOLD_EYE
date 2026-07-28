@@ -26,8 +26,8 @@ import urllib.request
 # Racine du projet sur le path (pour importer backtest)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from backtest import (apply_indicators, build_bulletin, decide, resample_h4,
-                      h4_at, BacktestConfig, Candle)
+from backtest import (apply_indicators, build_bulletin, decide, decide_deleuse,
+                      resample_h4, h4_at, BacktestConfig, Candle)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -123,8 +123,9 @@ class PaperPosition:
 # ============================================================
 # Logique commune : gerer position + decision sur une bougie fermee
 # ============================================================
-def step(state, row, h4, symbol, config):
+def step(state, candles, i, h4, symbol, config):
     """state = {'pos': PaperPosition|None, 'balance', 'trades': []}."""
+    row = candles[i]
     pos = state["pos"]
     if pos and not pos.closed:
         if pos.partial_event:
@@ -141,13 +142,16 @@ def step(state, row, h4, symbol, config):
             return
         state["pos"] = pos
     if state["pos"] is None:
-        h4_row = h4_at(h4, row.time)
-        if not h4_row:
-            return
         in_session = config.mode != "day" or (config.session_start_hour <= row.time.hour < config.session_end_hour)
         if not in_session:
             return
-        d = decide(build_bulletin(symbol, row, h4_row, config.spread_points), config)
+        if config.strategy == "deleuse":
+            d = decide_deleuse(candles, i, config)
+        else:
+            h4_row = h4_at(h4, row.time)
+            if not h4_row:
+                return
+            d = decide(build_bulletin(symbol, row, h4_row, config.spread_points), config)
         if d.decision in ("BUY", "SELL"):
             state["pos"] = PaperPosition(d.decision, row.close, row.atr, config, row.time)
             print(f"🟢 {row.time} OUVERTURE {d.decision} @ {row.close:.5f} | "
@@ -179,7 +183,7 @@ def run_replay(symbol, ticker, config, n_bars, delay):
     print(f"\n🎬 PAPER TRADING (REPLAY) {symbol} | mode {config.mode.upper()} | "
           f"{len(h1) - start} bougies H1 | solde départ {config.initial_balance}\n")
     for i in range(start, len(h1) - 1):  # on exclut la derniere (en cours)
-        step(state, h1[i], h4, symbol, config)
+        step(state, h1, i, h4, symbol, config)
         if delay:
             time.sleep(delay)
     if state["pos"] and not state["pos"].closed:  # cloture finale
@@ -209,7 +213,7 @@ def run_live(symbol, ticker, config, duration_min, poll_sec):
             continue
         h4 = resample_h4(h1)
         last_closed = h1[len(h1) - 2]
-        step(state, last_closed, h4, symbol, config)
+        step(state, h1, len(h1) - 2, h4, symbol, config)
         px = last_closed.close
         pos_str = f"en position {state['pos'].side} (SL {state['pos'].sl:.5f})" if state["pos"] else "à plat"
         if last_closed.time != last_bar_time:
@@ -225,6 +229,7 @@ def main():
     p.add_argument("--risk", type=float, default=1.0)
     p.add_argument("--mode", choices=["day", "swing"], default="day")
     p.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
+    p.add_argument("--strategy", choices=["deleuse", "trend"], default="deleuse")
     p.add_argument("--bars", type=int, default=250, help="nb de bougies rejouees (replay)")
     p.add_argument("--delay", type=float, default=0.03, help="pause entre bougies (replay)")
     p.add_argument("--live", action="store_true", help="mode live (sondage continu)")
@@ -233,7 +238,8 @@ def main():
     args = p.parse_args()
 
     ticker = TICKERS.get(args.symbol.upper(), args.symbol)
-    config = BacktestConfig(symbol=args.symbol, risk_percent=args.risk, mode=args.mode, adx_min=args.adx_min)
+    config = BacktestConfig(symbol=args.symbol, risk_percent=args.risk, mode=args.mode,
+                            adx_min=args.adx_min, strategy=args.strategy)
 
     if args.live:
         run_live(args.symbol, ticker, config, args.minutes, args.poll)

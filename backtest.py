@@ -66,6 +66,11 @@ class BacktestConfig:
     tp1_r: float = 1.5              # cible de prise partielle (en multiple de R)
     partial_ratio: float = 0.5      # fraction de la position fermee a tp1 (free trade)
     adx_min: int = 0                # force tendance min (0 = filtre ADX desactive ; calibre a 22 nuit a l'edge 2 ans)
+    # --- Strategie Deleuse (cassure de consolidation) ---
+    strategy: str = "deleuse"       # "deleuse" (cassure) ou "trend" (confluence EMA/VWAP/MACD)
+    box_lookback: int = 20          # fenetre de detection de la consolidation (en bougies)
+    box_max_atr: float = 2.2        # largeur max de la boite vs ATR (sinon = tendance deja partie)
+    min_body_ratio: float = 0.5     # corps de bougie min / amplitude (anti-doji)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
 
@@ -348,6 +353,57 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
     return Decision(direction, min(score, 95), f"Alignement {direction} H1/H4 + VWAP/MACD", config.sl_atr_multiplier, config.rr_ratio)
 
 
+def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Decision:
+    """
+    Strategie Benjamin Deleuse (day trading) :
+    1. Filtre de tendance EMA50 (prix dessus -> BUY, dessous -> SELL)
+    2. Detection d'une consolidation ('boite' support/resistance resserree)
+    3. Cassure de la boite dans le sens de l'EMA50 + bougie decisive (corps fort)
+    4. SL structurel (bord oppose de la boite), TP a R:R >= 2
+    """
+    lb = config.box_lookback
+    if i < lb + 2:
+        return Decision("WAIT", 0, "historique insuffisant", config.sl_atr_multiplier, config.rr_ratio)
+    cur = candles[i]
+    if cur.ema50 <= 0 or cur.atr <= 0:
+        return Decision("WAIT", 0, "indicateurs non prets", config.sl_atr_multiplier, config.rr_ratio)
+
+    trend_up = cur.close > cur.ema50
+    window = candles[i - lb : i]
+    resistance = max(c.high for c in window)
+    support = min(c.low for c in window)
+    box = resistance - support
+    if box <= 0:
+        return Decision("WAIT", 0, "boite invalide", config.sl_atr_multiplier, config.rr_ratio)
+    # Consolidation : la boite doit etre resserree vs la volatilite (pas une tendance deja partie)
+    if box > config.box_max_atr * cur.atr:
+        return Decision("WAIT", 0, "pas une consolidation (trop large)", config.sl_atr_multiplier, config.rr_ratio)
+
+    # Cassure + bougie decisive (corps fort, pas de doji)
+    rng = cur.high - cur.low
+    body = abs(cur.close - cur.open)
+    if rng <= 0 or body / rng < config.min_body_ratio:
+        return Decision("WAIT", 0, "bougie d'indecision (doji)", config.sl_atr_multiplier, config.rr_ratio)
+
+    if trend_up and cur.close > resistance:
+        entry = cur.close
+        risk = entry - support                  # SL sous le support casse
+        direction = "BUY"
+    elif (not trend_up) and cur.close < support:
+        entry = cur.close
+        risk = resistance - entry               # SL au-dessus de la resistance cassee
+        direction = "SELL"
+    else:
+        return Decision("WAIT", 0, "pas de cassure dans le sens EMA50", config.sl_atr_multiplier, config.rr_ratio)
+
+    if risk <= 0:
+        return Decision("WAIT", 0, "risque invalide", config.sl_atr_multiplier, config.rr_ratio)
+
+    sl_mult = risk / cur.atr                    # SL structurel encode pour simulate_trade
+    conf = min(95, 65 + int((box / cur.atr) * 6))
+    return Decision(direction, conf, f"Cassure {direction} (Deleuse) EMA50 + corps fort", sl_mult, config.rr_ratio)
+
+
 def simulate_trade(future: list[Candle], entry: float, entry_time: datetime, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
     risk_dist = atr_value * decision.sl_atr_multiplier
     if risk_dist <= 0:
@@ -420,18 +476,21 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
     n = len(h1)
     while i < n - config.max_holding_bars:
         row = h1[i]
-        h4_row = h4_at(h4, row.time)
-        if h4_row is None:
-            i += 1
-            continue
         # DAY TRADING : on n'entre qu'en session liquide (Londres/NY)
         if config.mode == "day":
             h = row.time.hour
             if not (config.session_start_hour <= h < config.session_end_hour):
                 i += 1
                 continue
-        bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
-        decision = decide(bulletin, config)
+        if config.strategy == "deleuse":
+            decision = decide_deleuse(h1, i, config)
+        else:
+            h4_row = h4_at(h4, row.time)
+            if h4_row is None:
+                i += 1
+                continue
+            bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
+            decision = decide(bulletin, config)
         if decision.decision == "WAIT":
             i += 1
             continue
@@ -528,6 +587,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session-start", type=int, default=6, help="heure UTC debut session (day)")
     parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
     parser.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
+    parser.add_argument("--strategy", choices=["deleuse", "trend"], default="deleuse", help="deleuse (cassure) ou trend (confluence)")
+    parser.add_argument("--box-lookback", type=int, default=20, help="Deleuse: fenetre de consolidation")
+    parser.add_argument("--box-max-atr", type=float, default=2.2, help="Deleuse: largeur max boite/ATR")
+    parser.add_argument("--min-body-ratio", type=float, default=0.5, help="Deleuse: corps min/ampleur (anti-doji)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
 
@@ -552,6 +615,10 @@ def main() -> None:
         session_start_hour=args.session_start,
         session_end_hour=args.session_end,
         adx_min=args.adx_min,
+        strategy=args.strategy,
+        box_lookback=args.box_lookback,
+        box_max_atr=args.box_max_atr,
+        min_body_ratio=args.min_body_ratio,
         point=point,
         output=args.output,
     )
