@@ -54,6 +54,9 @@ class BacktestConfig:
     max_holding_bars: int = 120      # ~5 jours : laisser courir les gagnants
     spread_points: int = 10
     cooldown_bars: int = 6           # pause apres chaque trade (anti-overtrading)
+    mode: str = "day"                # "day" (intraday) ou "swing"
+    session_start_hour: int = 6      # entrees uniquement en session liquide (heure UTC)
+    session_end_hour: int = 15       # fin des entrees (avant cloture NY)
     point: float = 0.00001
     be_at_r: float = 1.0
     be_offset_points: int = 10
@@ -296,7 +299,7 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
     return Decision(direction, min(score, 95), f"Alignement {direction} H1/H4 + VWAP/MACD", config.sl_atr_multiplier, config.rr_ratio)
 
 
-def simulate_trade(future: list[Candle], entry: float, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
+def simulate_trade(future: list[Candle], entry: float, entry_time: datetime, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
     risk_dist = atr_value * decision.sl_atr_multiplier
     if risk_dist <= 0:
         return "WAIT", 0.0, 0
@@ -310,6 +313,11 @@ def simulate_trade(future: list[Candle], entry: float, atr_value: float, decisio
 
     for idx, candle in enumerate(horizon):
         held = idx + 1
+        # DAY TRADING : on clôture au changement de jour (zéro position la nuit)
+        if config.mode == "day" and candle.time.date() != entry_time.date():
+            eo = candle.open
+            pnl_r = (eo - entry) / risk_dist if decision.decision == "BUY" else (entry - eo) / risk_dist
+            return "OPEN", pnl_r, held
         exit_price = candle.close
         if decision.decision == "BUY":
             if candle.low <= sl_current:
@@ -352,6 +360,12 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
         if h4_row is None:
             i += 1
             continue
+        # DAY TRADING : on n'entre qu'en session liquide (Londres/NY)
+        if config.mode == "day":
+            h = row.time.hour
+            if not (config.session_start_hour <= h < config.session_end_hour):
+                i += 1
+                continue
         bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
         decision = decide(bulletin, config)
         if decision.decision == "WAIT":
@@ -362,7 +376,7 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
         risk_dist = row.atr * decision.sl_atr_multiplier
         risk_amount = balance * (config.risk_percent / 100)
         lot_units = risk_amount / risk_dist if risk_dist else 0.0
-        outcome, pnl_r, held = simulate_trade(h1[i + 1 :], entry, row.atr, decision, config)
+        outcome, pnl_r, held = simulate_trade(h1[i + 1 :], entry, row.time, row.atr, decision, config)
         pnl_money = risk_amount * pnl_r
         balance += pnl_money
         results.append(
@@ -402,7 +416,9 @@ def write_results(results: list[TradeResult], output: str) -> None:
 
 def print_report(results: list[TradeResult], config: BacktestConfig) -> None:
     print("\n📊 BACKTEST GEMINI GOLD EYE")
-    print(f"Symbole: {config.symbol} | Risk: {config.risk_percent}% | RR: {config.rr_ratio}")
+    print(f"Symbole: {config.symbol} | Mode: {config.mode.upper()} | Risk: {config.risk_percent}% | RR: {config.rr_ratio}")
+    if config.mode == "day":
+        print(f"Session: {config.session_start_hour}h-{config.session_end_hour}h UTC | Sortie fin de jour (zéro nuit)")
     if not results:
         print("Aucun trade déclenché par les règles de confluence.")
         print(f"Export CSV: {config.output}")
@@ -444,6 +460,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sl-atr", type=float, default=2.0)
     parser.add_argument("--max-holding", type=int, default=120)
     parser.add_argument("--spread-points", type=int, default=10)
+    parser.add_argument("--mode", choices=["day", "swing"], default="day", help="day (intraday) ou swing")
+    parser.add_argument("--session-start", type=int, default=6, help="heure UTC debut session (day)")
+    parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
 
@@ -451,6 +470,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     point = 0.01 if "XAU" in args.symbol.upper() else 0.00001
+    # Day trading : tenue intraday courte + cooldown court ; swing : longue tenue
+    max_hold = 8 if args.mode == "day" else args.max_holding
+    cooldown = 3 if args.mode == "day" else 6
     config = BacktestConfig(
         symbol=args.symbol,
         bars=args.bars,
@@ -458,8 +480,12 @@ def main() -> None:
         min_confidence=args.confidence,
         sl_atr_multiplier=args.sl_atr,
         rr_ratio=args.rr,
-        max_holding_bars=args.max_holding,
+        max_holding_bars=max_hold,
         spread_points=args.spread_points,
+        cooldown_bars=cooldown,
+        mode=args.mode,
+        session_start_hour=args.session_start,
+        session_end_hour=args.session_end,
         point=point,
         output=args.output,
     )
