@@ -7,6 +7,12 @@ Usage (apres avoir rempli .env avec OANDA_API_TOKEN + OANDA_ACCOUNT_ID) :
     python tools/test_oanda.py
 """
 
+import os
+import sys
+
+# Permet d'importer 'config' / 'infrastructure' quel que soit le repertoire d'execution
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config import settings
 from infrastructure.oanda_client import OandaClient, to_oanda_symbol
 
