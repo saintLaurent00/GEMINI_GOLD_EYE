@@ -40,6 +40,7 @@ class Candle:
     macd_hist: float = 0.0
     stoch_k: float = 50.0
     vwap: float = 0.0
+    adx: float = 0.0
 
 
 @dataclass
@@ -64,6 +65,7 @@ class BacktestConfig:
     trailing_atr_multiplier: float = 1.5
     tp1_r: float = 1.5              # cible de prise partielle (en multiple de R)
     partial_ratio: float = 0.5      # fraction de la position fermee a tp1 (free trade)
+    adx_min: int = 22               # force de tendance minimale (filtre anti-range)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
 
@@ -100,6 +102,46 @@ def rolling_sma(values: list[float], i: int, length: int) -> float:
         return float("nan")
     window = values[i + 1 - length : i + 1]
     return sum(window) / length
+
+
+def compute_adx(candles: list[Candle], period: int = 14):
+    """ADX (Wilder) : force de la tendance. >25 = tendance, <20 = range/chop."""
+    n = len(candles)
+    if n < period * 2:
+        return
+    trs: list[float] = []
+    pdms: list[float] = []
+    mdms: list[float] = []
+    for i, c in enumerate(candles):
+        if i == 0:
+            trs.append(c.high - c.low); pdms.append(0.0); mdms.append(0.0)
+            continue
+        prev = candles[i - 1]
+        tr = max(c.high - c.low, abs(c.high - prev.close), abs(c.low - prev.close))
+        up = c.high - prev.high
+        down = prev.low - c.low
+        pdms.append(up if (up > down and up > 0) else 0.0)
+        mdms.append(down if (down > up and down > 0) else 0.0)
+        trs.append(tr)
+    tr_s = sum(trs[:period])
+    pdm_s = sum(pdms[:period])
+    mdm_s = sum(mdms[:period])
+    dxs: list[float] = []
+    adx = 0.0
+    for i in range(period, n):
+        tr_s = tr_s - tr_s / period + trs[i]
+        pdm_s = pdm_s - pdm_s / period + pdms[i]
+        mdm_s = mdm_s - mdm_s / period + mdms[i]
+        di_p = 100 * pdm_s / tr_s if tr_s else 0.0
+        di_m = 100 * mdm_s / tr_s if tr_s else 0.0
+        denom = di_p + di_m
+        dx = 100 * abs(di_p - di_m) / denom if denom else 0.0
+        dxs.append(dx)
+        if len(dxs) <= period:
+            adx = sum(dxs) / len(dxs)
+        else:
+            adx = (adx * (period - 1) + dx) / period
+        candles[i].adx = adx
 
 
 def apply_indicators(candles: list[Candle]) -> list[Candle]:
@@ -156,6 +198,7 @@ def apply_indicators(candles: list[Candle]) -> list[Candle]:
             total_volume += volumes[j]
         candle.vwap = typical_volume / total_volume if total_volume else close
 
+    compute_adx(candles)
     return [c for c in candles if math.isfinite(c.atr)]
 
 
@@ -255,6 +298,7 @@ def build_bulletin(symbol: str, h1: Candle, h4: Candle, spread_points: int) -> d
             "MACD_Histogram": round(h1.macd_hist, 5),
             "Stoch_K": round(h1.stoch_k, 2),
             "ATR": round(h1.atr, 5),
+            "ADX": round(h1.adx, 1),
             "Trend": "BULLISH" if h1.close > h1.ema200 else "BEARISH",
         },
         "H4_STRUCTURE": {
@@ -276,6 +320,9 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
         return Decision("WAIT", 20, "Spread Gold trop élevé", config.sl_atr_multiplier, config.rr_ratio)
     if h1["Trend"] != h4["Trend_EMA200"]:
         return Decision("WAIT", 35, "Conflit H1/H4", config.sl_atr_multiplier, config.rr_ratio)
+    # Filtre de régime : on ne trade que s'il y a une vraie tendance (sinon chop = pertes)
+    if h1.get("ADX", 0) < config.adx_min:
+        return Decision("WAIT", 30, "Marché en range (ADX faible)", config.sl_atr_multiplier, config.rr_ratio)
     if h1["RSI"] > 68 or h1["RSI"] < 32:
         return Decision("WAIT", 45, "RSI extrême", config.sl_atr_multiplier, config.rr_ratio)
 
@@ -480,6 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["day", "swing"], default="day", help="day (intraday) ou swing")
     parser.add_argument("--session-start", type=int, default=6, help="heure UTC debut session (day)")
     parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
+    parser.add_argument("--adx-min", type=int, default=22, help="force tendance min (filtre anti-range)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
 
@@ -503,6 +551,7 @@ def main() -> None:
         mode=args.mode,
         session_start_hour=args.session_start,
         session_end_hour=args.session_end,
+        adx_min=args.adx_min,
         point=point,
         output=args.output,
     )
