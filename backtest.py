@@ -68,8 +68,8 @@ class BacktestConfig:
     adx_min: int = 0                # force tendance min (0 = filtre ADX desactive ; calibre a 22 nuit a l'edge 2 ans)
     # --- Strategie Deleuse (cassure de consolidation) ---
     strategy: str = "deleuse"       # "deleuse" (cassure) ou "trend" (confluence EMA/VWAP/MACD)
-    box_lookback: int = 20          # fenetre de detection de la consolidation (en bougies)
-    box_max_atr: float = 2.2        # largeur max de la boite vs ATR (sinon = tendance deja partie)
+    box_lookback: int = 10          # fenetre de detection de la consolidation (en bougies)
+    box_contraction: float = 0.85   # la plage recente doit etre <= x% de la plage precedente (consolidation)
     min_body_ratio: float = 0.5     # corps de bougie min / amplitude (anti-doji)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
@@ -362,22 +362,24 @@ def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Dec
     4. SL structurel (bord oppose de la boite), TP a R:R >= 2
     """
     lb = config.box_lookback
-    if i < lb + 2:
+    if i < 2 * lb + 2:
         return Decision("WAIT", 0, "historique insuffisant", config.sl_atr_multiplier, config.rr_ratio)
     cur = candles[i]
     if cur.ema50 <= 0 or cur.atr <= 0:
         return Decision("WAIT", 0, "indicateurs non prets", config.sl_atr_multiplier, config.rr_ratio)
 
     trend_up = cur.close > cur.ema50
-    window = candles[i - lb : i]
-    resistance = max(c.high for c in window)
-    support = min(c.low for c in window)
-    box = resistance - support
-    if box <= 0:
+    recent = candles[i - lb : i]
+    prev = candles[i - 2 * lb : i - lb]
+    resistance = max(c.high for c in recent)
+    support = min(c.low for c in recent)
+    recent_box = resistance - support
+    prev_box = max(c.high for c in prev) - min(c.low for c in prev)
+    if recent_box <= 0:
         return Decision("WAIT", 0, "boite invalide", config.sl_atr_multiplier, config.rr_ratio)
-    # Consolidation : la boite doit etre resserree vs la volatilite (pas une tendance deja partie)
-    if box > config.box_max_atr * cur.atr:
-        return Decision("WAIT", 0, "pas une consolidation (trop large)", config.sl_atr_multiplier, config.rr_ratio)
+    # Consolidation : la plage recente se CONTRACTE vs la plage precedente (figure type drapeau)
+    if prev_box > 0 and recent_box > prev_box * config.box_contraction:
+        return Decision("WAIT", 0, "pas de contraction (consolidation absente)", config.sl_atr_multiplier, config.rr_ratio)
 
     # Cassure + bougie decisive (corps fort, pas de doji)
     rng = cur.high - cur.low
@@ -400,7 +402,8 @@ def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Dec
         return Decision("WAIT", 0, "risque invalide", config.sl_atr_multiplier, config.rr_ratio)
 
     sl_mult = risk / cur.atr                    # SL structurel encode pour simulate_trade
-    conf = min(95, 65 + int((box / cur.atr) * 6))
+    contraction = prev_box / recent_box if recent_box > 0 else 1.0
+    conf = min(95, 65 + int(max(contraction - 1, 0) * 8))
     return Decision(direction, conf, f"Cassure {direction} (Deleuse) EMA50 + corps fort", sl_mult, config.rr_ratio)
 
 
@@ -588,8 +591,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
     parser.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
     parser.add_argument("--strategy", choices=["deleuse", "trend"], default="deleuse", help="deleuse (cassure) ou trend (confluence)")
-    parser.add_argument("--box-lookback", type=int, default=20, help="Deleuse: fenetre de consolidation")
-    parser.add_argument("--box-max-atr", type=float, default=2.2, help="Deleuse: largeur max boite/ATR")
+    parser.add_argument("--box-lookback", type=int, default=10, help="Deleuse: fenetre de consolidation")
+    parser.add_argument("--box-contraction", type=float, default=0.85, help="Deleuse: plage recente <= x% plage precedente")
     parser.add_argument("--min-body-ratio", type=float, default=0.5, help="Deleuse: corps min/ampleur (anti-doji)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
@@ -617,7 +620,7 @@ def main() -> None:
         adx_min=args.adx_min,
         strategy=args.strategy,
         box_lookback=args.box_lookback,
-        box_max_atr=args.box_max_atr,
+        box_contraction=args.box_contraction,
         min_body_ratio=args.min_body_ratio,
         point=point,
         output=args.output,
