@@ -709,6 +709,7 @@ from data_processor.indicators import TacticalCalculator
 from core.strategy import GeminiStrategy
 from core.risk_manager import RiskManager
 from core.trade_manager import TradeManager
+from core.prop_guard import PropGuard
 
 # --- CONFIGURATION HORAIRE PROP FIRM (GMT/Abidjan) ---
 TRADING_START_HOUR = 8   
@@ -760,6 +761,7 @@ def main():
     brain = GeminiStrategy()
     risk_manager = RiskManager()
     trade_manager = TradeManager()
+    guard = PropGuard()  # Bouclier compte Prop-Firm (circuit-breaker journalier)
 
     # 3. INIT MÉMOIRE
     last_candle_memory = {}
@@ -810,7 +812,13 @@ def main():
                             confidence = decision.get('confidence', 0)
                             if confidence >= 75:
                                 print(f"✅ SIGNAL {confidence}% DETECTÉ...")
-                                
+
+                                # 0. BOUCLIER PROP-FIRM (circuit-breaker)
+                                ok, reason = guard.status()
+                                if not ok:
+                                    print(f"🛑 PROTECTION: {reason} — pas de nouveau trade.")
+                                    continue
+
                                 # Recalcul ATR
                                 calc = TacticalCalculator(symbol)
                                 bulletin = calc.get_bulletin()
