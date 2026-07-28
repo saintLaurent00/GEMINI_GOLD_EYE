@@ -512,6 +512,9 @@ def main() -> None:
         candles = load_csv(args.csv)
     else:
         candles = load_mt5(config.symbol, config.bars)
+    if not candles:
+        print("❌ Aucune bougie chargée (fichier vide, introuvable ou téléchargement échoué).")
+        return
     results = run_backtest(candles, config)
     write_results(results, config.output)
     print_report(results, config)

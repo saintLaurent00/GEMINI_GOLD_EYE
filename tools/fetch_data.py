@@ -6,21 +6,11 @@ Deux sources :
   - histdata: ~15 ans d'historique H1 (majors FX + metaux). Idéal pour tests longs.
 
 Aucune dependance externe : uniquement la bibliotheque standard.
-Fonctionne sur ton PC, sur Google Colab, sur n'importe quelle machine avec Python + internet.
 
 Exemples :
-    # 2 ans (Yahoo, rapide) - EUR/USD + Or
     python tools/fetch_data.py --source yahoo --range 2y
-
-    # 5 ANS d'historique reel (HistData) - EUR/USD
     python tools/fetch_data.py --source histdata --instrument eurusd --years 5 --out data/EURUSD_H1.csv
-
-    # 5 ANS - Or (XAU/USD)
-    python tools/fetch_data.py --source histdata --instrument xauusd --years 5 --out data/XAUUSD_H1.csv
-
-Puis lancer le backtest :
-    python backtest.py --csv data/EURUSD_H1.csv --symbol EURUSD
-    python backtest.py --csv data/XAUUSD_H1.csv --symbol XAUUSD
+    python tools/fetch_data.py --source histdata --instrument eurusd --diagnose   # debug rapide
 """
 
 import argparse
@@ -37,18 +27,22 @@ import urllib.request
 import zipfile
 from http.cookiejar import CookieJar
 
-_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _CJ = CookieJar()
 _OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_CJ))
 
 
+def _utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 # ============================================================
-# SOURCE 1 : YAHOO FINANCE (recent, ~2 ans max sur l'H1)
+# SOURCE 1 : YAHOO FINANCE (~2 ans max sur l'H1)
 # ============================================================
-def fetch_yahoo(ticker: str, interval: str = "1h", rng: str = "2y", retries: int = 3):
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-           f"?interval={interval}&range={rng}")
-    last_err = None
+def fetch_yahoo(ticker, interval="1h", rng="2y", retries=3):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={rng}"
+    last = None
     for _ in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -57,18 +51,18 @@ def fetch_yahoo(ticker: str, interval: str = "1h", rng: str = "2y", retries: int
             result = data["chart"]["result"][0]
             return result["timestamp"], result["indicators"]["quote"][0]
         except Exception as e:
-            last_err = e
-    raise RuntimeError(f"Echec Yahoo {ticker}: {last_err}")
+            last = e
+    raise RuntimeError(f"Echec Yahoo {ticker}: {last}")
 
 
-def yahoo_to_csv(ticker: str, outfile: str, rng: str):
+def yahoo_to_csv(ticker, outfile, rng):
     ts, quote = fetch_yahoo(ticker, rng=rng)
     rows = []
     for t, o, h, l, c in zip(ts, quote["open"], quote["high"], quote["low"], quote["close"]):
         if None in (o, h, l, c):
             continue
-        iso = datetime.datetime.utcfromtimestamp(int(t)).isoformat()
-        rows.append([iso, round(o, 5), round(h, 5), round(l, 5), round(c, 5)])
+        iso = datetime.datetime.fromtimestamp(int(t), datetime.timezone.utc).replace(tzinfo=None).isoformat()
+        rows.append([iso, o, h, l, c])
     _write_csv(outfile, rows)
     print(f"✅ Yahoo {ticker} -> {outfile}  ({len(rows)} bougies H1)")
 
@@ -76,14 +70,24 @@ def yahoo_to_csv(ticker: str, outfile: str, rng: str):
 # ============================================================
 # SOURCE 2 : HISTDATA (long historique, ~15 ans, gratuit)
 # ============================================================
-def _hist_request(url: str, data=None, referer=None, timeout=60):
-    headers = {"User-Agent": _UA, "Referer": referer or url, "Accept": "*/*"}
+def _hist_request(url, data=None, referer=None, timeout=60):
+    headers = {"User-Agent": _UA, "Referer": referer or url,
+               "Accept": "text/html,application/xhtml+xml,*/*"}
     req = urllib.request.Request(url, data=data, headers=headers)
     return _OPENER.open(req, timeout=timeout).read()
 
 
-def _parse_hist_line(line: str):
-    """Une ligne HistData -> (iso_time, open, high, low, close) ou None."""
+def _extract_form_fields(html):
+    fields = {}
+    for tag in re.findall(r"<input\b[^>]*>", html, flags=re.IGNORECASE):
+        nm = re.search(r"""name\s*=\s*["']([^"']+)["']""", tag, re.IGNORECASE)
+        vl = re.search(r"""value\s*=\s*["']([^"']*)["']""", tag, re.IGNORECASE)
+        if nm:
+            fields[nm.group(1)] = vl.group(1) if vl else ""
+    return fields
+
+
+def _parse_hist_line(line):
     parts = [p.strip() for p in line.replace(",", ";").split(";")]
     if len(parts) < 5:
         return None
@@ -103,25 +107,43 @@ def _parse_hist_line(line: str):
         return None
 
 
-def _download_hist_month(instrument: str, year: int, month: int):
-    """Telecharge un mois H1 depuis HistData -> liste de lignes (ou None si echec)."""
+def _download_hist_month(instrument, year, month, verbose=False):
     page = (f"https://www.histdata.com/download-free-forex-data/"
             f"?/ascii/1-hour-bar-quotes/{instrument}/{year}/{month}")
-    html = _hist_request(page).decode("utf-8", errors="ignore")
-    # On releve tous les champs caches du formulaire qui pointe vers /get.php
-    fields = {}
-    for tag in re.findall(r"<input\b[^>]*>", html):
-        nm = re.search(r'name="([^"]+)"', tag)
-        vl = re.search(r'value="([^"]*)"', tag)
-        if nm:
-            fields[nm.group(1)] = vl.group(1) if vl else ""
-    if "id" not in fields or "tk" not in fields:
-        return None  # mois indisponible
+    try:
+        raw = _hist_request(page)
+    except urllib.error.HTTPError as e:
+        if verbose:
+            print(f"  [{year}-{month}] HTTP {e.code} sur la page")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [{year}-{month}] Erreur reseau page: {e}")
+        return None
+    html = raw.decode("utf-8", errors="ignore")
+    if verbose and year == _utcnow().year - 1 and month == 1:
+        has_get = "get.php" in html
+        has_tk = "tk" in html
+        has_id = '"id"' in html
+        print(f"  [{year}-{month}] Page: {len(html)} octets | get.php={has_get} | tk={has_tk} | id={has_id}")
+    fields = _extract_form_fields(html)
+    if "tk" not in fields or "id" not in fields:
+        if verbose:
+            print(f"  [{year}-{month}] Formulaire/token introuvable (mois indisponible ou blocage)")
+        return None
     fields["platform"] = "HS"
     fields["timeframe"] = "H1"
+    fields["fxpair"] = instrument.upper()
     data = urllib.parse.urlencode(fields).encode()
-    blob = _hist_request("https://www.histdata.com/get.php", data=data, referer=page)
-    if not blob[:2] == b"PK":  # pas un zip -> erreur/indisponible
+    try:
+        blob = _hist_request("https://www.histdata.com/get.php", data=data, referer=page)
+    except Exception as e:
+        if verbose:
+            print(f"  [{year}-{month}] Erreur POST get.php: {e}")
+        return None
+    if blob[:2] != b"PK":
+        if verbose:
+            print(f"  [{year}-{month}] get.php n'a pas renvoye de zip ({len(blob)} octets)")
         return None
     rows = []
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
@@ -137,11 +159,10 @@ def _download_hist_month(instrument: str, year: int, month: int):
     return rows
 
 
-def histdata_to_csv(instrument: str, years: int, outfile: str):
-    now = datetime.datetime.utcnow()
+def histdata_to_csv(instrument, years, outfile):
+    now = _utcnow()
     start_year = now.year - years + 1
-    all_rows = []
-    ok, miss = 0, 0
+    all_rows, ok, miss = [], 0, 0
     for year in range(start_year, now.year + 1):
         last_month = now.month if year == now.year else 12
         for month in range(1, last_month + 1):
@@ -149,24 +170,39 @@ def histdata_to_csv(instrument: str, years: int, outfile: str):
                 rows = _download_hist_month(instrument, year, month)
             except Exception as e:
                 rows = None
-                print(f"   ⚠️ {instrument} {year}-{month}: {e}")
+                print(f"  ⚠️ {instrument} {year}-{month}: {e}")
             if rows:
                 all_rows.extend(rows)
                 ok += 1
             else:
                 miss += 1
-            time.sleep(0.4)  # polite, evite le blocage
+            time.sleep(0.4)
     all_rows.sort(key=lambda r: r[0])
     _write_csv(outfile, all_rows)
-    status = f"✅ HistData {instrument} ({years} ans) -> {outfile}  ({len(all_rows)} bougies H1, {ok} mois OK"
-    status += f", {miss} indisponibles)" if miss else f", {ok} mois OK)"
-    print(status)
+    msg = f"✅ HistData {instrument} ({years} ans) -> {outfile}  ({len(all_rows)} bougies, {ok} mois OK"
+    msg += f", {miss} indisponibles)" if miss else f", {ok} mois OK)"
+    print(msg)
+
+
+def diagnose_histdata(instrument):
+    """Teste UN seul mois en mode bavard pour identifier la cause d'un echec."""
+    year = _utcnow().year - 1
+    print(f"=== DIAGNOSTIC HistData : {instrument} mois {year}-1 ===")
+    rows = _download_hist_month(instrument, year, 1, verbose=True)
+    print("-" * 50)
+    if rows:
+        print(f"✅ SUCCES : {len(rows)} lignes récupérées. Exemple : {rows[0]}")
+        print("=> HistData fonctionne depuis Colab. Lance le téléchargement complet.")
+    else:
+        print("❌ ECHEC : 0 ligne.")
+        print("Causes probables : HistData bloque l'IP de Google Colab, ou la page a changé.")
+        print("=> On basculera sur Dukascopy (autre source gratuite).")
 
 
 # ============================================================
 # Commun
 # ============================================================
-def _write_csv(outfile: str, rows):
+def _write_csv(outfile, rows):
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -178,20 +214,21 @@ def _write_csv(outfile: str, rows):
 def main():
     p = argparse.ArgumentParser(description="Telecharge des bougies H1 gratuites")
     p.add_argument("--source", choices=["yahoo", "histdata"], default="yahoo")
-    # Yahoo
     p.add_argument("--range", default="2y")
-    # HistData
-    p.add_argument("--instrument", default="eurusd", help="ex: eurusd, gbpusd, usdjpy, xauusd")
+    p.add_argument("--instrument", default="eurusd")
     p.add_argument("--years", type=int, default=5)
-    p.add_argument("--out", help="fichier de sortie CSV")
+    p.add_argument("--out")
+    p.add_argument("--diagnose", action="store_true", help="test rapide d'un mois (debug)")
     args = p.parse_args()
 
     if args.source == "histdata":
+        if args.diagnose:
+            diagnose_histdata(args.instrument.lower())
+            return
         out = args.out or f"data/{args.instrument.upper()}_H1.csv"
         histdata_to_csv(args.instrument.lower(), args.years, out)
         return
 
-    # Yahoo : par defaut EUR/USD + Or
     if args.instrument and args.out:
         yahoo_to_csv(args.instrument, args.out, args.range)
         return
