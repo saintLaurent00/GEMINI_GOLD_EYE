@@ -95,6 +95,13 @@ def twelvedata_to_csv(td_symbol, apikey, years, outfile):
             req = urllib.request.Request(url, headers={"User-Agent": _UA})
             with urllib.request.urlopen(req, timeout=40) as resp:
                 data = json.load(resp)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore")
+            print(f"❌ HTTP {e.code}: {body[:300]}")
+            if e.code == 401:
+                print("   -> Cle API invalide OU email non confirme.")
+                print("   -> Verifie : 1) cle bien collee (sans espaces), 2) email confirme sur twelvedata.com")
+            break
         except Exception as e:
             print(f"⚠️ Erreur reseau: {e}")
             break
@@ -123,6 +130,9 @@ def twelvedata_to_csv(td_symbol, apikey, years, outfile):
     rows = sorted(collected.items())
     out_rows = [[dt.isoformat()] + list(ohlc) for dt, ohlc in rows]
     _write_csv(outfile, out_rows)
+    if not rows:
+        print(f"❌ Echec : 0 bougie recuperee pour {td_symbol}. Verifie ta cle API.")
+        return
     print(f"✅ Twelve Data {td_symbol} ({years} ans) -> {outfile}  ({len(rows)} bougies H1)")
 
 
