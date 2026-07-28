@@ -216,6 +216,100 @@ def ask_gemini(client, bulletin, image_paths):
 
 
 # ============================================================
+# BACKTEST Gemini (rejoue l'historique, aussi vite que Gemini repond)
+# ============================================================
+def _load_df(path):
+    df = pd.read_csv(path)
+    df["time"] = pd.to_datetime(df["time"].astype(str).str.replace("Z", ""))
+    df = df.set_index("time").sort_index()
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float)
+    if "volume" not in df.columns:
+        df["volume"] = 1000.0
+    return df[["open", "high", "low", "close", "volume"]]
+
+
+def _resample(df, rule):
+    r = df.resample(rule, label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+    return add_indicators(r)
+
+
+def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
+    from backtest import load_csv, apply_indicators, decide_deleuse
+    if not os.getenv("GEMINI_API_KEY", ""):
+        print("❌ GEMINI_API_KEY manquante. Gratuite sur https://aistudio.google.com/")
+        return
+    client = GeminiClient()
+    candles = apply_indicators(load_csv(csv_path))
+    h1_df = add_indicators(_load_df(csv_path))
+    h4_df = _resample(h1_df, "4h")
+    d1_df = _resample(h1_df, "1d")
+    w1_df = _resample(h1_df, "1W")
+    start = max(220, len(candles) - n_bars)
+    state = {"pos": None, "balance": config.initial_balance, "trades": [], "last_price": float(candles[-2].close)}
+    gemini_calls = 0
+    print(f"🤖 BACKTEST GEMINI sur {symbol} | {len(candles) - start} bougies H1 | "
+          f"Deleuse pré-sélectionne, Gemini confirme | max {max_gemini} appels\n")
+
+    i = start
+    n = len(candles)
+    while i < n - 1:
+        row = candles[i]
+        state["last_price"] = float(row.close)
+        manage(state, row, config)
+        if state["pos"] is None and gemini_calls < max_gemini:
+            in_session = config.mode != "day" or (config.session_start_hour <= row.time.hour < config.session_end_hour)
+            cand = decide_deleuse(candles, i, config)
+            if in_session and cand.decision in ("BUY", "SELL"):
+                t = row.time
+                price = float(row.close)
+                try:
+                    h1s = h1_df[h1_df.index <= t]; h4s = h4_df[h4_df.index <= t]
+                    d1s = d1_df[d1_df.index <= t]; w1s = w1_df[w1_df.index <= t]
+                    bulletin = build_bulletin(symbol, h1s, h4s, price, config.spread_points)
+                    paths = [paint_chart(w1s, symbol, "W1"), paint_chart(d1s, symbol, "D1"),
+                             paint_chart(h4s, symbol, "H4"), paint_chart(h1s, symbol, "H1")]
+                    g = ask_gemini(client, bulletin, paths)
+                    gemini_calls += 1
+                except Exception as e:
+                    print(f"  ⚠️ cycle: {e}"); g = None
+                verdict = (g or {}).get("decision", "WAIT")
+                conf = (g or {}).get("confidence", 0)
+                reason = (g or {}).get("reason", "")[:60]
+                if g and verdict in ("BUY", "SELL") and conf >= 75:
+                    atr = float(row.atr) if row.atr else 0.001
+                    sl_mult = float((g or {}).get("sl_atr_multiplier", cand.sl_atr_multiplier))
+                    state["pos"] = PaperPosition(verdict, price, atr, config, row.time)
+                    state["pos"].sl = price - atr * sl_mult if verdict == "BUY" else price + atr * sl_mult
+                    state["pos"].risk = atr * sl_mult
+                    print(f"🟢 {t} {verdict} @ {price:.5f} (règle+IA {conf}%) | {reason}")
+                else:
+                    print(f"⏸️ {t} candidat {cand.decision} rejeté par l'IA ({verdict} {conf}%)")
+                i += config.cooldown_bars
+                continue
+        i += 1
+
+    # Cloture mark-to-market fin de backtest
+    if state["pos"] and not state["pos"].closed:
+        pos = state["pos"]
+        rfun = (lambda p: (p - pos.entry) / pos.risk) if pos.side == "BUY" else (lambda p: (pos.entry - p) / pos.risk)
+        half = config.partial_ratio
+        pnl = (half * config.tp1_r + (1 - half) * rfun(state["last_price"])) if pos.partial else rfun(state["last_price"])
+        state["balance"] += state["balance"] * config.risk_percent / 100 * pnl
+        state["trades"].append(pnl)
+        print(f"  ↪ Clôture fin de backtest: {pnl:+.2f}R | solde {state['balance']:.2f}")
+
+    t = state["trades"]
+    wins = sum(1 for x in t if x > 0)
+    print("\n" + "=" * 60)
+    print(f"📊 BILAN GEMINI (backtest) | Trades: {len(t)} | Wins: {wins} | "
+          f"Expectancy: {(sum(t)/len(t)) if t else 0:+.2f}R | Solde: {state['balance']:.2f}")
+    print(f"   Appels Gemini: {gemini_calls}")
+    print("=" * 60)
+
+
+# ============================================================
 # Boucle principale
 # ============================================================
 def manage(state, candle, config):
@@ -314,16 +408,31 @@ def run(symbol, ticker, config, rounds, interval, gemini_every):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Vrai bot Gemini en paper trading (Yahoo)")
+    p = argparse.ArgumentParser(description="Vrai bot Gemini (paper live OU backtest)")
     p.add_argument("--symbol", default="XAUUSD")
-    p.add_argument("--rounds", type=int, default=12)
-    p.add_argument("--interval", type=int, default=300, help="secondes entre cycles")
-    p.add_argument("--gemini-every", type=int, default=6, help="appel Gemini tous les N cycles")
     p.add_argument("--risk", type=float, default=1.0)
+    p.add_argument("--strategy", choices=["deleuse", "trend"], default="deleuse")
+    # mode backtest
+    p.add_argument("--backtest", action="store_true", help="rejoue l'historique (sans attendre)")
+    p.add_argument("--csv", help="CSV H1 (defaut: data/{SYMBOL}_H1.csv)")
+    p.add_argument("--bars", type=int, default=1500, help="fenetre de backtest (bougies H1)")
+    p.add_argument("--max-gemini", type=int, default=60, help="limite d'appels Gemini (quota)")
+    # mode live
+    p.add_argument("--rounds", type=int, default=12)
+    p.add_argument("--interval", type=int, default=300, help="secondes entre cycles (live)")
+    p.add_argument("--gemini-every", type=int, default=6, help="appel Gemini tous les N cycles (live)")
     args = p.parse_args()
-    ticker = TICKERS.get(args.symbol.upper(), args.symbol)
-    config = BacktestConfig(symbol=args.symbol, risk_percent=args.risk, mode="day")
-    run(args.symbol, ticker, config, args.rounds, args.interval, args.gemini_every)
+    config = BacktestConfig(symbol=args.symbol, risk_percent=args.risk, mode="day", strategy=args.strategy)
+    if args.backtest:
+        csv = args.csv or f"data/{args.symbol.upper()}_H1.csv"
+        if not os.path.exists(csv):
+            print(f"❌ CSV introuvable: {csv}")
+            print("   Lance: python tools/fetch_data.py --source yahoo --range 2y")
+            return
+        run_backtest(args.symbol, csv, config, args.bars, args.max_gemini)
+    else:
+        ticker = TICKERS.get(args.symbol.upper(), args.symbol)
+        run(args.symbol, ticker, config, args.rounds, args.interval, args.gemini_every)
 
 
 if __name__ == "__main__":
