@@ -50,9 +50,10 @@ class BacktestConfig:
     risk_percent: float = 1.0
     min_confidence: int = 75
     sl_atr_multiplier: float = 2.0
-    rr_ratio: float = 3.0
-    max_holding_bars: int = 48
+    rr_ratio: float = 2.5            # objectif R:R 1:2.5
+    max_holding_bars: int = 120      # ~5 jours : laisser courir les gagnants
     spread_points: int = 10
+    cooldown_bars: int = 6           # pause apres chaque trade (anti-overtrading)
     point: float = 0.00001
     be_at_r: float = 1.0
     be_offset_points: int = 10
@@ -270,10 +271,14 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
         return Decision("WAIT", 20, "Spread Gold trop élevé", config.sl_atr_multiplier, config.rr_ratio)
     if h1["Trend"] != h4["Trend_EMA200"]:
         return Decision("WAIT", 35, "Conflit H1/H4", config.sl_atr_multiplier, config.rr_ratio)
-    if h1["RSI"] > 70 or h1["RSI"] < 30:
+    if h1["RSI"] > 68 or h1["RSI"] < 32:
         return Decision("WAIT", 45, "RSI extrême", config.sl_atr_multiplier, config.rr_ratio)
 
     direction: Direction = "BUY" if h1["Trend"] == "BULLISH" else "SELL"
+
+    # Confluence VWAP : le biais VWAP doit suivre la tendance H1 (sinon pas d'entrée)
+    if bias != h1["Trend"]:
+        return Decision("WAIT", 40, "VWAP désaligné de la tendance", config.sl_atr_multiplier, config.rr_ratio)
     score = 45
     if (direction == "BUY" and bias == "BULLISH") or (direction == "SELL" and bias == "BEARISH"):
         score += 15
@@ -291,24 +296,26 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
     return Decision(direction, min(score, 95), f"Alignement {direction} H1/H4 + VWAP/MACD", config.sl_atr_multiplier, config.rr_ratio)
 
 
-def simulate_trade(future: list[Candle], entry: float, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float]:
+def simulate_trade(future: list[Candle], entry: float, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
     risk_dist = atr_value * decision.sl_atr_multiplier
     if risk_dist <= 0:
-        return "WAIT", 0.0
+        return "WAIT", 0.0, 0
     sl = entry - risk_dist if decision.decision == "BUY" else entry + risk_dist
     tp = entry + risk_dist * decision.risk_reward_ratio if decision.decision == "BUY" else entry - risk_dist * decision.risk_reward_ratio
     be_active = False
     sl_current = sl
     exit_price = entry
     trailing_dist = atr_value * config.trailing_atr_multiplier
+    horizon = future[: config.max_holding_bars]
 
-    for candle in future[: config.max_holding_bars]:
+    for idx, candle in enumerate(horizon):
+        held = idx + 1
         exit_price = candle.close
         if decision.decision == "BUY":
             if candle.low <= sl_current:
-                return ("BE" if be_active else "LOSS", 0.0 if be_active else -1.0)
+                return ("BE" if be_active else "LOSS"), (0.0 if be_active else -1.0), held
             if candle.high >= tp:
-                return "WIN", decision.risk_reward_ratio
+                return "WIN", decision.risk_reward_ratio, held
             if not be_active and candle.high >= entry + risk_dist * config.be_at_r:
                 sl_current = entry + config.be_offset_points * config.point
                 be_active = True
@@ -316,9 +323,9 @@ def simulate_trade(future: list[Candle], entry: float, atr_value: float, decisio
                 sl_current = max(sl_current, candle.close - trailing_dist)
         else:
             if candle.high >= sl_current:
-                return ("BE" if be_active else "LOSS", 0.0 if be_active else -1.0)
+                return ("BE" if be_active else "LOSS"), (0.0 if be_active else -1.0), held
             if candle.low <= tp:
-                return "WIN", decision.risk_reward_ratio
+                return "WIN", decision.risk_reward_ratio, held
             if not be_active and candle.low <= entry - risk_dist * config.be_at_r:
                 sl_current = entry - config.be_offset_points * config.point
                 be_active = True
@@ -326,7 +333,7 @@ def simulate_trade(future: list[Candle], entry: float, atr_value: float, decisio
                 sl_current = min(sl_current, candle.close + trailing_dist)
 
     pnl_r = (exit_price - entry) / risk_dist if decision.decision == "BUY" else (entry - exit_price) / risk_dist
-    return "OPEN", pnl_r
+    return "OPEN", pnl_r, len(horizon)
 
 
 def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeResult]:
@@ -335,21 +342,27 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
     balance = config.initial_balance
     results: list[TradeResult] = []
 
-    for i in range(220, len(h1) - config.max_holding_bars):
+    # UNE seule position à la fois + cooldown : on avance dans le temps après
+    # chaque trade (réaliste, évite l'overtrading de 4000+ trades).
+    i = 220
+    n = len(h1)
+    while i < n - config.max_holding_bars:
         row = h1[i]
         h4_row = h4_at(h4, row.time)
         if h4_row is None:
+            i += 1
             continue
         bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
         decision = decide(bulletin, config)
         if decision.decision == "WAIT":
+            i += 1
             continue
 
         entry = row.close
         risk_dist = row.atr * decision.sl_atr_multiplier
         risk_amount = balance * (config.risk_percent / 100)
         lot_units = risk_amount / risk_dist if risk_dist else 0.0
-        outcome, pnl_r = simulate_trade(h1[i + 1 :], entry, row.atr, decision, config)
+        outcome, pnl_r, held = simulate_trade(h1[i + 1 :], entry, row.atr, decision, config)
         pnl_money = risk_amount * pnl_r
         balance += pnl_money
         results.append(
@@ -371,6 +384,8 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
                 reason=decision.reason,
             )
         )
+        # On saute la durée du trade + cooldown : pas de chevauchement.
+        i += max(held, 1) + config.cooldown_bars
     return results
 
 
@@ -399,10 +414,19 @@ def print_report(results: list[TradeResult], config: BacktestConfig) -> None:
     win_rate = wins / max(wins + losses, 1) * 100
     expectancy = sum(r.pnl_r for r in results) / len(results)
     final_balance = results[-1].balance
+    gross_win = sum(r.pnl_money for r in results if r.pnl_money > 0)
+    gross_loss = abs(sum(r.pnl_money for r in results if r.pnl_money < 0))
+    profit_factor = gross_win / gross_loss if gross_loss else float("inf")
+    peak = config.initial_balance
+    max_dd = 0.0
+    for r in results:
+        peak = max(peak, r.balance)
+        max_dd = min(max_dd, r.balance - peak)
     print(f"Trades: {len(results)} | WIN: {wins} | LOSS: {losses} | BE: {be} | OPEN: {open_trades}")
     print(f"Win rate hors BE/OPEN: {win_rate:.1f}%")
-    print(f"Expectancy: {expectancy:.2f} R/trade")
+    print(f"Expectancy: {expectancy:.2f} R/trade | Profit factor: {profit_factor:.2f}")
     print(f"Capital final: {final_balance:.2f} ({final_balance - config.initial_balance:+.2f})")
+    print(f"Drawdown max: {max_dd:.2f} ({max_dd / config.initial_balance * 100:.1f}%)")
     print(f"Export CSV: {config.output}")
 
 
@@ -416,9 +440,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bars", type=int, default=1200)
     parser.add_argument("--risk", type=float, default=float(os.getenv("RISK_PER_TRADE", "1.0")))
     parser.add_argument("--confidence", type=int, default=75)
-    parser.add_argument("--rr", type=float, default=3.0)
+    parser.add_argument("--rr", type=float, default=2.5)
     parser.add_argument("--sl-atr", type=float, default=2.0)
-    parser.add_argument("--max-holding", type=int, default=48)
+    parser.add_argument("--max-holding", type=int, default=120)
     parser.add_argument("--spread-points", type=int, default=10)
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
