@@ -13,6 +13,11 @@ MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 
+# --- OANDA (broker cloud, fonctionne sans MT5/VPS) ---
+OANDA_API_TOKEN = os.getenv("OANDA_API_TOKEN", "")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
+OANDA_PRACTICE = os.getenv("OANDA_PRACTICE", "True") == "True"  # True = compte démo
+
 # --- 2. TRADING SETTINGS ---
 # On transforme la string "EURUSD,GBPUSD" en liste ['EURUSD', 'GBPUSD']
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS_LIST", "AUDCAD,USDJPY,USDCHF,XAUUSD").split(",") if s.strip()]
