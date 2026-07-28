@@ -1,9 +1,16 @@
 import os
-from dotenv import load_dotenv
-import MetaTrader5 as mt5
 
-# Chargement des variables d'environnement
-load_dotenv()
+# Dépendances optionnelles : le bot doit s'importer SANS MT5 (chemin OANDA / Colab / Linux)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass  # .env absent -> variables d'environnement lues directement
+
+try:
+    import MetaTrader5 as mt5
+except Exception:
+    mt5 = None  # non disponible hors Windows (chemin OANDA)
 
 # --- 1. CREDENTIALS ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -31,7 +38,7 @@ TRAILING_DIST = int(os.getenv("TRAILING_DIST", "300"))
 
 # --- 3. ARCHITECTURE TEMPORELLE ---
 # Bougie qui "réveille" le bot (détection de nouvelle bougie)
-TIMEFRAME_TRIGGER = mt5.TIMEFRAME_H4
+TIMEFRAME_TRIGGER = mt5.TIMEFRAME_H4 if mt5 else "H4"
 # NB : les timeframes de VISION (images IA) vivent dans config/symbols.py
 #     (source de vérité unique -> plus de conflit H4/H1)
 
