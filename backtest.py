@@ -65,7 +65,7 @@ class BacktestConfig:
     trailing_atr_multiplier: float = 1.5
     tp1_r: float = 1.5              # cible de prise partielle (en multiple de R)
     partial_ratio: float = 0.5      # fraction de la position fermee a tp1 (free trade)
-    adx_min: int = 22               # force de tendance minimale (filtre anti-range)
+    adx_min: int = 0                # force tendance min (0 = filtre ADX desactive ; calibre a 22 nuit a l'edge 2 ans)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
 
@@ -527,7 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["day", "swing"], default="day", help="day (intraday) ou swing")
     parser.add_argument("--session-start", type=int, default=6, help="heure UTC debut session (day)")
     parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
-    parser.add_argument("--adx-min", type=int, default=22, help="force tendance min (filtre anti-range)")
+    parser.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
 

@@ -224,7 +224,7 @@ def main():
     p.add_argument("--symbol", default="EURUSD")
     p.add_argument("--risk", type=float, default=1.0)
     p.add_argument("--mode", choices=["day", "swing"], default="day")
-    p.add_argument("--adx-min", type=int, default=22, help="force tendance min (filtre anti-range)")
+    p.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
     p.add_argument("--bars", type=int, default=250, help="nb de bougies rejouees (replay)")
     p.add_argument("--delay", type=float, default=0.03, help="pause entre bougies (replay)")
     p.add_argument("--live", action="store_true", help="mode live (sondage continu)")
