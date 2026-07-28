@@ -62,6 +62,8 @@ class BacktestConfig:
     be_offset_points: int = 10
     trailing_start_r: float = 1.7
     trailing_atr_multiplier: float = 1.5
+    tp1_r: float = 1.5              # cible de prise partielle (en multiple de R)
+    partial_ratio: float = 0.5      # fraction de la position fermee a tp1 (free trade)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
 
@@ -303,45 +305,60 @@ def simulate_trade(future: list[Candle], entry: float, entry_time: datetime, atr
     risk_dist = atr_value * decision.sl_atr_multiplier
     if risk_dist <= 0:
         return "WAIT", 0.0, 0
-    sl = entry - risk_dist if decision.decision == "BUY" else entry + risk_dist
-    tp = entry + risk_dist * decision.risk_reward_ratio if decision.decision == "BUY" else entry - risk_dist * decision.risk_reward_ratio
-    be_active = False
+    is_buy = decision.decision == "BUY"
+    sl = entry - risk_dist if is_buy else entry + risk_dist
+    tp1 = entry + risk_dist * config.tp1_r if is_buy else entry - risk_dist * config.tp1_r        # prise partielle
+    tp2 = entry + risk_dist * decision.risk_reward_ratio if is_buy else entry - risk_dist * decision.risk_reward_ratio  # cible finale
+    half = config.partial_ratio
+    partial_done = False
     sl_current = sl
     exit_price = entry
     trailing_dist = atr_value * config.trailing_atr_multiplier
     horizon = future[: config.max_holding_bars]
 
+    def runner(price: float) -> float:
+        return (price - entry) / risk_dist if is_buy else (entry - price) / risk_dist
+
     for idx, candle in enumerate(horizon):
         held = idx + 1
-        # DAY TRADING : on clôture au changement de jour (zéro position la nuit)
+        # DAY TRADING : sortie fin de jour (zéro position la nuit)
         if config.mode == "day" and candle.time.date() != entry_time.date():
-            eo = candle.open
-            pnl_r = (eo - entry) / risk_dist if decision.decision == "BUY" else (entry - eo) / risk_dist
-            return "OPEN", pnl_r, held
+            rpnl = runner(candle.open)
+            pnl = (half * config.tp1_r + (1 - half) * rpnl) if partial_done else rpnl
+            return "OPEN", pnl, held
         exit_price = candle.close
-        if decision.decision == "BUY":
-            if candle.low <= sl_current:
-                return ("BE" if be_active else "LOSS"), (0.0 if be_active else -1.0), held
-            if candle.high >= tp:
-                return "WIN", decision.risk_reward_ratio, held
-            if not be_active and candle.high >= entry + risk_dist * config.be_at_r:
-                sl_current = entry + config.be_offset_points * config.point
-                be_active = True
-            if be_active and candle.high >= entry + risk_dist * config.trailing_start_r:
+        if is_buy:
+            if candle.low <= sl_current:                                   # stop (conservateur d'abord)
+                if partial_done:
+                    pnl = half * config.tp1_r + (1 - half) * runner(sl_current)
+                    return ("WIN" if pnl > 0 else "LOSS"), pnl, held
+                return "LOSS", -1.0, held
+            if not partial_done and candle.high >= tp1:                     # FREE TRADE : on sécurise 50% + SL à l'entrée
+                partial_done = True
+                sl_current = entry
+            if partial_done and candle.high >= tp2:                        # cible finale sur le reste
+                pnl = half * config.tp1_r + (1 - half) * decision.risk_reward_ratio
+                return "WIN", pnl, held
+            if partial_done:                                               # trailing sur le runner
                 sl_current = max(sl_current, candle.close - trailing_dist)
         else:
             if candle.high >= sl_current:
-                return ("BE" if be_active else "LOSS"), (0.0 if be_active else -1.0), held
-            if candle.low <= tp:
-                return "WIN", decision.risk_reward_ratio, held
-            if not be_active and candle.low <= entry - risk_dist * config.be_at_r:
-                sl_current = entry - config.be_offset_points * config.point
-                be_active = True
-            if be_active and candle.low <= entry - risk_dist * config.trailing_start_r:
+                if partial_done:
+                    pnl = half * config.tp1_r + (1 - half) * runner(sl_current)
+                    return ("WIN" if pnl > 0 else "LOSS"), pnl, held
+                return "LOSS", -1.0, held
+            if not partial_done and candle.low <= tp1:
+                partial_done = True
+                sl_current = entry
+            if partial_done and candle.low <= tp2:
+                pnl = half * config.tp1_r + (1 - half) * decision.risk_reward_ratio
+                return "WIN", pnl, held
+            if partial_done:
                 sl_current = min(sl_current, candle.close + trailing_dist)
 
-    pnl_r = (exit_price - entry) / risk_dist if decision.decision == "BUY" else (entry - exit_price) / risk_dist
-    return "OPEN", pnl_r, len(horizon)
+    rpnl = runner(exit_price)
+    pnl = (half * config.tp1_r + (1 - half) * rpnl) if partial_done else rpnl
+    return "OPEN", pnl, len(horizon)
 
 
 def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeResult]:
