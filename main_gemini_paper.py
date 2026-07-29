@@ -267,7 +267,7 @@ def _resample(df, rule):
     return add_indicators(r)
 
 
-def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
+def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60, offset_bars=0):
     from backtest import load_csv, apply_indicators, decide_deleuse
     if not (os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")):
         print("❌ Clé Gemini manquante. Gratuite sur https://aistudio.google.com/")
@@ -279,14 +279,15 @@ def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
     h4_df = _resample(h1_df, "4h")
     d1_df = _resample(h1_df, "1d")
     w1_df = _resample(h1_df, "1W")
-    start = max(220, len(candles) - n_bars)
-    state = {"pos": None, "balance": config.initial_balance, "trades": [], "last_price": float(candles[-2].close)}
+    start = max(220, len(candles) - n_bars - offset_bars)
+    end = len(candles) - offset_bars
+    state = {"pos": None, "balance": config.initial_balance, "trades": [], "last_price": float(candles[min(end-2, len(candles)-1)].close)}
     gemini_calls = 0
-    print(f"🤖 BACKTEST GEMINI sur {symbol} | {len(candles) - start} bougies H1 | "
-          f"Deleuse pré-sélectionne, Gemini confirme | max {max_gemini} appels\n")
+    print(f"🤖 BACKTEST GEMINI sur {symbol} | fenêtre {end - start} bougies H1 | "
+          f"offset {offset_bars} | Deleuse pré-sélectionne, Gemini confirme | max {max_gemini} appels\n")
 
     i = start
-    n = len(candles)
+    n = end
     while i < n - 1:
         row = candles[i]
         state["last_price"] = float(row.close)
@@ -455,6 +456,7 @@ def main():
     p.add_argument("--csv", help="CSV H1 (defaut: data/{SYMBOL}_H1.csv)")
     p.add_argument("--bars", type=int, default=1500, help="fenetre de backtest (bougies H1)")
     p.add_argument("--max-gemini", type=int, default=60, help="limite d'appels Gemini (quota)")
+    p.add_argument("--offset-bars", type=int, default=0, help="décale la fenêtre vers le passé (régime ciblé)")
     # mode live
     p.add_argument("--rounds", type=int, default=12)
     p.add_argument("--interval", type=int, default=300, help="secondes entre cycles (live)")
@@ -467,7 +469,7 @@ def main():
             print(f"❌ CSV introuvable: {csv}")
             print("   Lance: python tools/fetch_data.py --source yahoo --range 2y")
             return
-        run_backtest(args.symbol, csv, config, args.bars, args.max_gemini)
+        run_backtest(args.symbol, csv, config, args.bars, args.max_gemini, args.offset_bars)
     else:
         ticker = TICKERS.get(args.symbol.upper(), args.symbol)
         run(args.symbol, ticker, config, args.rounds, args.interval, args.gemini_every)

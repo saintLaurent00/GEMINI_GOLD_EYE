@@ -353,6 +353,48 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
     return Decision(direction, min(score, 95), f"Alignement {direction} H1/H4 + VWAP/MACD", config.sl_atr_multiplier, config.rr_ratio)
 
 
+def _linear_slope(values):
+    """Pente d'une regression lineaire simple sur une liste de valeurs."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    mx = sum(xs) / n
+    my = sum(values) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, values))
+    den = sum((x - mx) ** 2 for x in xs)
+    return num / den if den else 0.0
+
+
+def classify_pattern(recent, atr):
+    """
+    Classe la figure de consolidation detectee :
+    RANGE / TRIANGLE ASC / TRIANGLE DESC / DRAPEAU (flag) / BISEAU DESC / EXPANSION.
+    """
+    if not recent or atr <= 0:
+        return "RANGE"
+    highs = [c.high for c in recent]
+    lows = [c.low for c in recent]
+    s_res = _linear_slope(highs) / atr    # pente resistance normalisee ATR
+    s_sup = _linear_slope(lows) / atr     # pente support normalisee ATR
+    thr = 0.15                            # seuil de pente (ATR/bougie)
+    res_flat = abs(s_res) < thr
+    sup_flat = abs(s_sup) < thr
+    if res_flat and sup_flat:
+        return "RANGE"
+    if s_sup > thr and res_flat:
+        return "TRIANGLE ASC"
+    if s_res < -thr and sup_flat:
+        return "TRIANGLE DESC"
+    if s_res > thr and s_sup > thr:
+        return "DRAPEAU"
+    if s_res < -thr and s_sup < -thr:
+        return "BISEAU DESC"
+    if s_res > thr and s_sup < -thr:
+        return "EXPANSION"
+    return "CONSOLIDATION"
+
+
 def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Decision:
     """
     Strategie Benjamin Deleuse (day trading) :
@@ -403,8 +445,9 @@ def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Dec
 
     sl_mult = risk / cur.atr                    # SL structurel encode pour simulate_trade
     contraction = prev_box / recent_box if recent_box > 0 else 1.0
+    pattern = classify_pattern(recent, cur.atr)
     conf = min(95, 65 + int(max(contraction - 1, 0) * 8))
-    return Decision(direction, conf, f"Cassure {direction} (Deleuse) EMA50 + corps fort", sl_mult, config.rr_ratio)
+    return Decision(direction, conf, f"Cassure {direction} [{pattern}] EMA50 + corps fort", sl_mult, config.rr_ratio)
 
 
 def simulate_trade(future: list[Candle], entry: float, entry_time: datetime, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
