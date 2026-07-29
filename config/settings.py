@@ -13,7 +13,11 @@ except Exception:
     mt5 = None  # non disponible hors Windows (chemin OANDA)
 
 # --- 1. CREDENTIALS ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Cles API Gemini : accepte une LISTE (rotation automatique en cas de quota).
+# Soit GEMINI_API_KEYS="cle1,cle2,cle3" , soit GEMINI_API_KEY="cle1" (retro-compatible).
+_raw_keys = os.getenv("GEMINI_API_KEYS", "") or os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None  # retro-compat
 HF_API_KEY = os.getenv("HF_API_KEY")
 
 MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))

@@ -269,8 +269,9 @@ def _resample(df, rule):
 
 def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
     from backtest import load_csv, apply_indicators, decide_deleuse
-    if not os.getenv("GEMINI_API_KEY", ""):
-        print("❌ GEMINI_API_KEY manquante. Gratuite sur https://aistudio.google.com/")
+    if not (os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")):
+        print("❌ Clé Gemini manquante. Gratuite sur https://aistudio.google.com/")
+        print("   export GEMINI_API_KEYS=\"cle1,cle2,...\"  (rotation auto en cas de quota)")
         return
     client = GeminiClient()
     candles = apply_indicators(load_csv(csv_path))
@@ -319,6 +320,8 @@ def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
                     state["pos"].sl = price - atr * sl_mult if verdict == "BUY" else price + atr * sl_mult
                     state["pos"].risk = atr * sl_mult
                     print(f"🟢 {t} {verdict} @ {price:.5f} (règle+IA {conf}%) | {reason}")
+                elif g is None:
+                    print(f"⏸️ {t} candidat {cand.decision} ignoré (API Gemini indisponible)")
                 else:
                     print(f"⏸️ {t} candidat {cand.decision} rejeté par l'IA ({verdict} {conf}%)")
                 i += config.cooldown_bars
@@ -361,9 +364,9 @@ def manage(state, candle, config):
 
 
 def run(symbol, ticker, config, rounds, interval, gemini_every):
-    key = os.getenv("GEMINI_API_KEY", "")
-    if not key:
-        print("❌ GEMINI_API_KEY manquante. Obtiens-en une gratuite sur https://aistudio.google.com/")
+    if not (os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")):
+        print("❌ Clé Gemini manquante. Gratuite sur https://aistudio.google.com/")
+        print("   export GEMINI_API_KEYS=\"cle1,cle2,...\"  (rotation auto en cas de quota)")
         return
     client = GeminiClient()
     state = {"pos": None, "balance": config.initial_balance, "trades": []}
