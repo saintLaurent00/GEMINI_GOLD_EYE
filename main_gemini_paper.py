@@ -118,27 +118,59 @@ def _sr(df, window=12, n=8):
     return list(dict.fromkeys(lv))[:n]
 
 
+def _to_x(pdf, d):
+    """Map une date vers sa position entiere dans le graphique (robuste)."""
+    try:
+        loc = pdf.index.get_loc(d)
+        return loc if isinstance(loc, int) else 0
+    except Exception:
+        idx = pdf.index.get_indexer([d], method="nearest")
+        return int(idx[0]) if idx[0] >= 0 else 0
+
+
 def paint_chart(df, symbol, tf_name, outdir="charts_buffer"):
     os.makedirs(outdir, exist_ok=True)
     pdf = df.tail(120).copy()
+    # Addplots : on n'ajoute QUE les colonnes ayant au moins une valeur valide (anti-NaN fatal)
     adds = []
     for col, c in [("EMA50", "orange"), ("EMA200", "blue"), ("VWAP", "purple")]:
-        if col in pdf:
-            adds.append(mpf.make_addplot(pdf[col], color=c, width=0.9))
+        if col in pdf and pdf[col].dropna().shape[0] > 0:
+            try:
+                adds.append(mpf.make_addplot(pdf[col].fillna(method="ffill").fillna(0), color=c, width=0.9))
+            except Exception:
+                pass
     zz = _zigzag(pdf)
     sr = _sr(pdf)
-    args = {"type": "candle", "style": "yahoo", "addplot": adds,
+    args = {"type": "candle", "style": "yahoo", "addplot": adds or None,
             "returnfig": True, "tight_layout": True, "title": f"{symbol} {tf_name}"}
-    if sr:
-        args["hlines"] = dict(hlines=sr, colors="green", alpha=0.4, linestyle="--")
-    if len(zz) > 1:
-        args["alines"] = dict(alines=zz, colors="magenta", linewidths=1.4, alpha=0.8)
-    fig, axes = mpf.plot(pdf, **args)
-    axes[0].axhline(float(pdf["close"].iloc[-1]), color="red", linewidth=0.8)
-    path = os.path.join(outdir, f"{symbol}_{tf_name}.png")
-    fig.savefig(path, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-    return path
+
+    def _finalize(fig, ax):
+        # ZigZag (magenta) dessine en matplotlib direct (plus fiable que mplfinance alines)
+        if len(zz) > 1:
+            xs = [_to_x(pdf, d) for d, _ in zz]
+            ys = [p for _, p in zz]
+            ax.plot(xs, ys, color="magenta", linewidth=1.4, alpha=0.8)
+        for lv in sr:                                   # S/R en pointilles vert
+            ax.axhline(lv, color="green", linestyle="--", alpha=0.4, linewidth=0.8)
+        ax.axhline(float(pdf["close"].iloc[-1]), color="red", linewidth=0.8)  # prix live
+        path = os.path.join(outdir, f"{symbol}_{tf_name}.png")
+        fig.savefig(path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        return path
+
+    try:
+        fig, axes = mpf.plot(pdf, **args)
+        return _finalize(fig, axes[0])
+    except Exception as e:
+        # Repli: graphique chandeliers minimal sans addplots (garantit un PNG)
+        try:
+            plt.close("all")
+            fig, axes = mpf.plot(pdf, type="candle", style="yahoo", returnfig=True, tight_layout=True,
+                                 title=f"{symbol} {tf_name}")
+            return _finalize(fig, axes[0])
+        except Exception as e2:
+            print(f"   ⚠️ paint_chart {tf_name} irreparable: {e2}")
+            return None
 
 
 # ============================================================
@@ -270,10 +302,13 @@ def run_backtest(symbol, csv_path, config, n_bars, max_gemini=60):
                     bulletin = build_bulletin(symbol, h1s, h4s, price, config.spread_points)
                     paths = [paint_chart(w1s, symbol, "W1"), paint_chart(d1s, symbol, "D1"),
                              paint_chart(h4s, symbol, "H4"), paint_chart(h1s, symbol, "H1")]
+                    paths = [p for p in paths if p]   # on garde uniquement les graphiques valides
+                    if len(paths) < 2:
+                        raise RuntimeError("graphiques insuffisants")
                     g = ask_gemini(client, bulletin, paths)
                     gemini_calls += 1
                 except Exception as e:
-                    print(f"  ⚠️ cycle: {e}"); g = None
+                    print(f"  ⚠️ cycle {t}: {e}"); g = None
                 verdict = (g or {}).get("decision", "WAIT")
                 conf = (g or {}).get("confidence", 0)
                 reason = (g or {}).get("reason", "")[:60]
