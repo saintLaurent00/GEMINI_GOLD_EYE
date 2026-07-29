@@ -12,3 +12,7 @@ logs/
 # Environnement virtuel
 venv/
 .venv/
+# Sorties de backtest (generées)
+backtest_results/
+# Données téléchargées
+data/

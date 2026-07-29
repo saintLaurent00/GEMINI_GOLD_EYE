@@ -40,6 +40,7 @@ class Candle:
     macd_hist: float = 0.0
     stoch_k: float = 50.0
     vwap: float = 0.0
+    adx: float = 0.0
 
 
 @dataclass
@@ -50,14 +51,26 @@ class BacktestConfig:
     risk_percent: float = 1.0
     min_confidence: int = 75
     sl_atr_multiplier: float = 2.0
-    rr_ratio: float = 3.0
-    max_holding_bars: int = 48
+    rr_ratio: float = 2.5            # objectif R:R 1:2.5
+    max_holding_bars: int = 120      # ~5 jours : laisser courir les gagnants
     spread_points: int = 10
+    cooldown_bars: int = 6           # pause apres chaque trade (anti-overtrading)
+    mode: str = "day"                # "day" (intraday) ou "swing"
+    session_start_hour: int = 6      # entrees uniquement en session liquide (heure UTC)
+    session_end_hour: int = 15       # fin des entrees (avant cloture NY)
     point: float = 0.00001
     be_at_r: float = 1.0
     be_offset_points: int = 10
     trailing_start_r: float = 1.7
     trailing_atr_multiplier: float = 1.5
+    tp1_r: float = 1.5              # cible de prise partielle (en multiple de R)
+    partial_ratio: float = 0.5      # fraction de la position fermee a tp1 (free trade)
+    adx_min: int = 0                # force tendance min (0 = filtre ADX desactive ; calibre a 22 nuit a l'edge 2 ans)
+    # --- Strategie Deleuse (cassure de consolidation) ---
+    strategy: str = "deleuse"       # "deleuse" (cassure) ou "trend" (confluence EMA/VWAP/MACD)
+    box_lookback: int = 10          # fenetre de detection de la consolidation (en bougies)
+    box_contraction: float = 0.85   # la plage recente doit etre <= x% de la plage precedente (consolidation)
+    min_body_ratio: float = 0.5     # corps de bougie min / amplitude (anti-doji)
     output: str = "backtest_results/gemini_gold_eye_backtest.csv"
 
 
@@ -94,6 +107,46 @@ def rolling_sma(values: list[float], i: int, length: int) -> float:
         return float("nan")
     window = values[i + 1 - length : i + 1]
     return sum(window) / length
+
+
+def compute_adx(candles: list[Candle], period: int = 14):
+    """ADX (Wilder) : force de la tendance. >25 = tendance, <20 = range/chop."""
+    n = len(candles)
+    if n < period * 2:
+        return
+    trs: list[float] = []
+    pdms: list[float] = []
+    mdms: list[float] = []
+    for i, c in enumerate(candles):
+        if i == 0:
+            trs.append(c.high - c.low); pdms.append(0.0); mdms.append(0.0)
+            continue
+        prev = candles[i - 1]
+        tr = max(c.high - c.low, abs(c.high - prev.close), abs(c.low - prev.close))
+        up = c.high - prev.high
+        down = prev.low - c.low
+        pdms.append(up if (up > down and up > 0) else 0.0)
+        mdms.append(down if (down > up and down > 0) else 0.0)
+        trs.append(tr)
+    tr_s = sum(trs[:period])
+    pdm_s = sum(pdms[:period])
+    mdm_s = sum(mdms[:period])
+    dxs: list[float] = []
+    adx = 0.0
+    for i in range(period, n):
+        tr_s = tr_s - tr_s / period + trs[i]
+        pdm_s = pdm_s - pdm_s / period + pdms[i]
+        mdm_s = mdm_s - mdm_s / period + mdms[i]
+        di_p = 100 * pdm_s / tr_s if tr_s else 0.0
+        di_m = 100 * mdm_s / tr_s if tr_s else 0.0
+        denom = di_p + di_m
+        dx = 100 * abs(di_p - di_m) / denom if denom else 0.0
+        dxs.append(dx)
+        if len(dxs) <= period:
+            adx = sum(dxs) / len(dxs)
+        else:
+            adx = (adx * (period - 1) + dx) / period
+        candles[i].adx = adx
 
 
 def apply_indicators(candles: list[Candle]) -> list[Candle]:
@@ -150,6 +203,7 @@ def apply_indicators(candles: list[Candle]) -> list[Candle]:
             total_volume += volumes[j]
         candle.vwap = typical_volume / total_volume if total_volume else close
 
+    compute_adx(candles)
     return [c for c in candles if math.isfinite(c.atr)]
 
 
@@ -249,6 +303,7 @@ def build_bulletin(symbol: str, h1: Candle, h4: Candle, spread_points: int) -> d
             "MACD_Histogram": round(h1.macd_hist, 5),
             "Stoch_K": round(h1.stoch_k, 2),
             "ATR": round(h1.atr, 5),
+            "ADX": round(h1.adx, 1),
             "Trend": "BULLISH" if h1.close > h1.ema200 else "BEARISH",
         },
         "H4_STRUCTURE": {
@@ -270,10 +325,17 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
         return Decision("WAIT", 20, "Spread Gold trop élevé", config.sl_atr_multiplier, config.rr_ratio)
     if h1["Trend"] != h4["Trend_EMA200"]:
         return Decision("WAIT", 35, "Conflit H1/H4", config.sl_atr_multiplier, config.rr_ratio)
-    if h1["RSI"] > 70 or h1["RSI"] < 30:
+    # Filtre de régime : on ne trade que s'il y a une vraie tendance (sinon chop = pertes)
+    if h1.get("ADX", 0) < config.adx_min:
+        return Decision("WAIT", 30, "Marché en range (ADX faible)", config.sl_atr_multiplier, config.rr_ratio)
+    if h1["RSI"] > 68 or h1["RSI"] < 32:
         return Decision("WAIT", 45, "RSI extrême", config.sl_atr_multiplier, config.rr_ratio)
 
     direction: Direction = "BUY" if h1["Trend"] == "BULLISH" else "SELL"
+
+    # Confluence VWAP : le biais VWAP doit suivre la tendance H1 (sinon pas d'entrée)
+    if bias != h1["Trend"]:
+        return Decision("WAIT", 40, "VWAP désaligné de la tendance", config.sl_atr_multiplier, config.rr_ratio)
     score = 45
     if (direction == "BUY" and bias == "BULLISH") or (direction == "SELL" and bias == "BEARISH"):
         score += 15
@@ -291,42 +353,161 @@ def decide(bulletin: dict, config: BacktestConfig) -> Decision:
     return Decision(direction, min(score, 95), f"Alignement {direction} H1/H4 + VWAP/MACD", config.sl_atr_multiplier, config.rr_ratio)
 
 
-def simulate_trade(future: list[Candle], entry: float, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float]:
+def _linear_slope(values):
+    """Pente d'une regression lineaire simple sur une liste de valeurs."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    mx = sum(xs) / n
+    my = sum(values) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, values))
+    den = sum((x - mx) ** 2 for x in xs)
+    return num / den if den else 0.0
+
+
+def classify_pattern(recent, atr):
+    """
+    Classe la figure de consolidation detectee :
+    RANGE / TRIANGLE ASC / TRIANGLE DESC / DRAPEAU (flag) / BISEAU DESC / EXPANSION.
+    """
+    if not recent or atr <= 0:
+        return "RANGE"
+    highs = [c.high for c in recent]
+    lows = [c.low for c in recent]
+    s_res = _linear_slope(highs) / atr    # pente resistance normalisee ATR
+    s_sup = _linear_slope(lows) / atr     # pente support normalisee ATR
+    thr = 0.15                            # seuil de pente (ATR/bougie)
+    res_flat = abs(s_res) < thr
+    sup_flat = abs(s_sup) < thr
+    if res_flat and sup_flat:
+        return "RANGE"
+    if s_sup > thr and res_flat:
+        return "TRIANGLE ASC"
+    if s_res < -thr and sup_flat:
+        return "TRIANGLE DESC"
+    if s_res > thr and s_sup > thr:
+        return "DRAPEAU"
+    if s_res < -thr and s_sup < -thr:
+        return "BISEAU DESC"
+    if s_res > thr and s_sup < -thr:
+        return "EXPANSION"
+    return "CONSOLIDATION"
+
+
+def decide_deleuse(candles: list[Candle], i: int, config: BacktestConfig) -> Decision:
+    """
+    Strategie Benjamin Deleuse (day trading) :
+    1. Filtre de tendance EMA50 (prix dessus -> BUY, dessous -> SELL)
+    2. Detection d'une consolidation ('boite' support/resistance resserree)
+    3. Cassure de la boite dans le sens de l'EMA50 + bougie decisive (corps fort)
+    4. SL structurel (bord oppose de la boite), TP a R:R >= 2
+    """
+    lb = config.box_lookback
+    if i < 2 * lb + 2:
+        return Decision("WAIT", 0, "historique insuffisant", config.sl_atr_multiplier, config.rr_ratio)
+    cur = candles[i]
+    if cur.ema50 <= 0 or cur.atr <= 0:
+        return Decision("WAIT", 0, "indicateurs non prets", config.sl_atr_multiplier, config.rr_ratio)
+
+    trend_up = cur.close > cur.ema50
+    recent = candles[i - lb : i]
+    prev = candles[i - 2 * lb : i - lb]
+    resistance = max(c.high for c in recent)
+    support = min(c.low for c in recent)
+    recent_box = resistance - support
+    prev_box = max(c.high for c in prev) - min(c.low for c in prev)
+    if recent_box <= 0:
+        return Decision("WAIT", 0, "boite invalide", config.sl_atr_multiplier, config.rr_ratio)
+    # Consolidation : la plage recente se CONTRACTE vs la plage precedente (figure type drapeau)
+    if prev_box > 0 and recent_box > prev_box * config.box_contraction:
+        return Decision("WAIT", 0, "pas de contraction (consolidation absente)", config.sl_atr_multiplier, config.rr_ratio)
+
+    # Cassure + bougie decisive (corps fort, pas de doji)
+    rng = cur.high - cur.low
+    body = abs(cur.close - cur.open)
+    if rng <= 0 or body / rng < config.min_body_ratio:
+        return Decision("WAIT", 0, "bougie d'indecision (doji)", config.sl_atr_multiplier, config.rr_ratio)
+
+    if trend_up and cur.close > resistance:
+        entry = cur.close
+        risk = entry - support                  # SL sous le support casse
+        direction = "BUY"
+    elif (not trend_up) and cur.close < support:
+        entry = cur.close
+        risk = resistance - entry               # SL au-dessus de la resistance cassee
+        direction = "SELL"
+    else:
+        return Decision("WAIT", 0, "pas de cassure dans le sens EMA50", config.sl_atr_multiplier, config.rr_ratio)
+
+    if risk <= 0:
+        return Decision("WAIT", 0, "risque invalide", config.sl_atr_multiplier, config.rr_ratio)
+
+    sl_mult = risk / cur.atr                    # SL structurel encode pour simulate_trade
+    contraction = prev_box / recent_box if recent_box > 0 else 1.0
+    pattern = classify_pattern(recent, cur.atr)
+    conf = min(95, 65 + int(max(contraction - 1, 0) * 8))
+    return Decision(direction, conf, f"Cassure {direction} [{pattern}] EMA50 + corps fort", sl_mult, config.rr_ratio)
+
+
+def simulate_trade(future: list[Candle], entry: float, entry_time: datetime, atr_value: float, decision: Decision, config: BacktestConfig) -> tuple[Outcome, float, int]:
     risk_dist = atr_value * decision.sl_atr_multiplier
     if risk_dist <= 0:
-        return "WAIT", 0.0
-    sl = entry - risk_dist if decision.decision == "BUY" else entry + risk_dist
-    tp = entry + risk_dist * decision.risk_reward_ratio if decision.decision == "BUY" else entry - risk_dist * decision.risk_reward_ratio
-    be_active = False
+        return "WAIT", 0.0, 0
+    is_buy = decision.decision == "BUY"
+    sl = entry - risk_dist if is_buy else entry + risk_dist
+    tp1 = entry + risk_dist * config.tp1_r if is_buy else entry - risk_dist * config.tp1_r        # prise partielle
+    tp2 = entry + risk_dist * decision.risk_reward_ratio if is_buy else entry - risk_dist * decision.risk_reward_ratio  # cible finale
+    half = config.partial_ratio
+    partial_done = False
     sl_current = sl
     exit_price = entry
     trailing_dist = atr_value * config.trailing_atr_multiplier
+    horizon = future[: config.max_holding_bars]
 
-    for candle in future[: config.max_holding_bars]:
+    def runner(price: float) -> float:
+        return (price - entry) / risk_dist if is_buy else (entry - price) / risk_dist
+
+    for idx, candle in enumerate(horizon):
+        held = idx + 1
+        # DAY TRADING : sortie fin de jour (zéro position la nuit)
+        if config.mode == "day" and candle.time.date() != entry_time.date():
+            rpnl = runner(candle.open)
+            pnl = (half * config.tp1_r + (1 - half) * rpnl) if partial_done else rpnl
+            return "OPEN", pnl, held
         exit_price = candle.close
-        if decision.decision == "BUY":
-            if candle.low <= sl_current:
-                return ("BE" if be_active else "LOSS", 0.0 if be_active else -1.0)
-            if candle.high >= tp:
-                return "WIN", decision.risk_reward_ratio
-            if not be_active and candle.high >= entry + risk_dist * config.be_at_r:
-                sl_current = entry + config.be_offset_points * config.point
-                be_active = True
-            if be_active and candle.high >= entry + risk_dist * config.trailing_start_r:
+        if is_buy:
+            if candle.low <= sl_current:                                   # stop (conservateur d'abord)
+                if partial_done:
+                    pnl = half * config.tp1_r + (1 - half) * runner(sl_current)
+                    return ("WIN" if pnl > 0 else "LOSS"), pnl, held
+                return "LOSS", -1.0, held
+            if not partial_done and candle.high >= tp1:                     # FREE TRADE : on sécurise 50% + SL à l'entrée
+                partial_done = True
+                sl_current = entry
+            if partial_done and candle.high >= tp2:                        # cible finale sur le reste
+                pnl = half * config.tp1_r + (1 - half) * decision.risk_reward_ratio
+                return "WIN", pnl, held
+            if partial_done:                                               # trailing sur le runner
                 sl_current = max(sl_current, candle.close - trailing_dist)
         else:
             if candle.high >= sl_current:
-                return ("BE" if be_active else "LOSS", 0.0 if be_active else -1.0)
-            if candle.low <= tp:
-                return "WIN", decision.risk_reward_ratio
-            if not be_active and candle.low <= entry - risk_dist * config.be_at_r:
-                sl_current = entry - config.be_offset_points * config.point
-                be_active = True
-            if be_active and candle.low <= entry - risk_dist * config.trailing_start_r:
+                if partial_done:
+                    pnl = half * config.tp1_r + (1 - half) * runner(sl_current)
+                    return ("WIN" if pnl > 0 else "LOSS"), pnl, held
+                return "LOSS", -1.0, held
+            if not partial_done and candle.low <= tp1:
+                partial_done = True
+                sl_current = entry
+            if partial_done and candle.low <= tp2:
+                pnl = half * config.tp1_r + (1 - half) * decision.risk_reward_ratio
+                return "WIN", pnl, held
+            if partial_done:
                 sl_current = min(sl_current, candle.close + trailing_dist)
 
-    pnl_r = (exit_price - entry) / risk_dist if decision.decision == "BUY" else (entry - exit_price) / risk_dist
-    return "OPEN", pnl_r
+    rpnl = runner(exit_price)
+    pnl = (half * config.tp1_r + (1 - half) * rpnl) if partial_done else rpnl
+    return "OPEN", pnl, len(horizon)
 
 
 def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeResult]:
@@ -335,21 +516,36 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
     balance = config.initial_balance
     results: list[TradeResult] = []
 
-    for i in range(220, len(h1) - config.max_holding_bars):
+    # UNE seule position à la fois + cooldown : on avance dans le temps après
+    # chaque trade (réaliste, évite l'overtrading de 4000+ trades).
+    i = 220
+    n = len(h1)
+    while i < n - config.max_holding_bars:
         row = h1[i]
-        h4_row = h4_at(h4, row.time)
-        if h4_row is None:
-            continue
-        bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
-        decision = decide(bulletin, config)
+        # DAY TRADING : on n'entre qu'en session liquide (Londres/NY)
+        if config.mode == "day":
+            h = row.time.hour
+            if not (config.session_start_hour <= h < config.session_end_hour):
+                i += 1
+                continue
+        if config.strategy == "deleuse":
+            decision = decide_deleuse(h1, i, config)
+        else:
+            h4_row = h4_at(h4, row.time)
+            if h4_row is None:
+                i += 1
+                continue
+            bulletin = build_bulletin(config.symbol, row, h4_row, config.spread_points)
+            decision = decide(bulletin, config)
         if decision.decision == "WAIT":
+            i += 1
             continue
 
         entry = row.close
         risk_dist = row.atr * decision.sl_atr_multiplier
         risk_amount = balance * (config.risk_percent / 100)
         lot_units = risk_amount / risk_dist if risk_dist else 0.0
-        outcome, pnl_r = simulate_trade(h1[i + 1 :], entry, row.atr, decision, config)
+        outcome, pnl_r, held = simulate_trade(h1[i + 1 :], entry, row.time, row.atr, decision, config)
         pnl_money = risk_amount * pnl_r
         balance += pnl_money
         results.append(
@@ -371,6 +567,8 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> list[TradeRes
                 reason=decision.reason,
             )
         )
+        # On saute la durée du trade + cooldown : pas de chevauchement.
+        i += max(held, 1) + config.cooldown_bars
     return results
 
 
@@ -387,7 +585,9 @@ def write_results(results: list[TradeResult], output: str) -> None:
 
 def print_report(results: list[TradeResult], config: BacktestConfig) -> None:
     print("\n📊 BACKTEST GEMINI GOLD EYE")
-    print(f"Symbole: {config.symbol} | Risk: {config.risk_percent}% | RR: {config.rr_ratio}")
+    print(f"Symbole: {config.symbol} | Mode: {config.mode.upper()} | Risk: {config.risk_percent}% | RR: {config.rr_ratio}")
+    if config.mode == "day":
+        print(f"Session: {config.session_start_hour}h-{config.session_end_hour}h UTC | Sortie fin de jour (zéro nuit)")
     if not results:
         print("Aucun trade déclenché par les règles de confluence.")
         print(f"Export CSV: {config.output}")
@@ -399,10 +599,19 @@ def print_report(results: list[TradeResult], config: BacktestConfig) -> None:
     win_rate = wins / max(wins + losses, 1) * 100
     expectancy = sum(r.pnl_r for r in results) / len(results)
     final_balance = results[-1].balance
+    gross_win = sum(r.pnl_money for r in results if r.pnl_money > 0)
+    gross_loss = abs(sum(r.pnl_money for r in results if r.pnl_money < 0))
+    profit_factor = gross_win / gross_loss if gross_loss else float("inf")
+    peak = config.initial_balance
+    max_dd = 0.0
+    for r in results:
+        peak = max(peak, r.balance)
+        max_dd = min(max_dd, r.balance - peak)
     print(f"Trades: {len(results)} | WIN: {wins} | LOSS: {losses} | BE: {be} | OPEN: {open_trades}")
     print(f"Win rate hors BE/OPEN: {win_rate:.1f}%")
-    print(f"Expectancy: {expectancy:.2f} R/trade")
+    print(f"Expectancy: {expectancy:.2f} R/trade | Profit factor: {profit_factor:.2f}")
     print(f"Capital final: {final_balance:.2f} ({final_balance - config.initial_balance:+.2f})")
+    print(f"Drawdown max: {max_dd:.2f} ({max_dd / config.initial_balance * 100:.1f}%)")
     print(f"Export CSV: {config.output}")
 
 
@@ -416,10 +625,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bars", type=int, default=1200)
     parser.add_argument("--risk", type=float, default=float(os.getenv("RISK_PER_TRADE", "1.0")))
     parser.add_argument("--confidence", type=int, default=75)
-    parser.add_argument("--rr", type=float, default=3.0)
+    parser.add_argument("--rr", type=float, default=2.5)
     parser.add_argument("--sl-atr", type=float, default=2.0)
-    parser.add_argument("--max-holding", type=int, default=48)
+    parser.add_argument("--max-holding", type=int, default=120)
     parser.add_argument("--spread-points", type=int, default=10)
+    parser.add_argument("--mode", choices=["day", "swing"], default="day", help="day (intraday) ou swing")
+    parser.add_argument("--session-start", type=int, default=6, help="heure UTC debut session (day)")
+    parser.add_argument("--session-end", type=int, default=15, help="heure UTC fin entrees (day)")
+    parser.add_argument("--adx-min", type=int, default=0, help="force tendance min (0=off ; >0 filtre ADX)")
+    parser.add_argument("--strategy", choices=["deleuse", "trend"], default="deleuse", help="deleuse (cassure) ou trend (confluence)")
+    parser.add_argument("--box-lookback", type=int, default=10, help="Deleuse: fenetre de consolidation")
+    parser.add_argument("--box-contraction", type=float, default=0.85, help="Deleuse: plage recente <= x% plage precedente")
+    parser.add_argument("--min-body-ratio", type=float, default=0.5, help="Deleuse: corps min/ampleur (anti-doji)")
     parser.add_argument("--output", default="backtest_results/gemini_gold_eye_backtest.csv")
     return parser.parse_args()
 
@@ -427,6 +644,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     point = 0.01 if "XAU" in args.symbol.upper() else 0.00001
+    # Day trading : tenue intraday courte + cooldown court ; swing : longue tenue
+    max_hold = 8 if args.mode == "day" else args.max_holding
+    cooldown = 3 if args.mode == "day" else 6
     config = BacktestConfig(
         symbol=args.symbol,
         bars=args.bars,
@@ -434,8 +654,17 @@ def main() -> None:
         min_confidence=args.confidence,
         sl_atr_multiplier=args.sl_atr,
         rr_ratio=args.rr,
-        max_holding_bars=args.max_holding,
+        max_holding_bars=max_hold,
         spread_points=args.spread_points,
+        cooldown_bars=cooldown,
+        mode=args.mode,
+        session_start_hour=args.session_start,
+        session_end_hour=args.session_end,
+        adx_min=args.adx_min,
+        strategy=args.strategy,
+        box_lookback=args.box_lookback,
+        box_contraction=args.box_contraction,
+        min_body_ratio=args.min_body_ratio,
         point=point,
         output=args.output,
     )
@@ -445,6 +674,9 @@ def main() -> None:
         candles = load_csv(args.csv)
     else:
         candles = load_mt5(config.symbol, config.bars)
+    if not candles:
+        print("❌ Aucune bougie chargée (fichier vide, introuvable ou téléchargement échoué).")
+        return
     results = run_backtest(candles, config)
     write_results(results, config.output)
     print_report(results, config)
