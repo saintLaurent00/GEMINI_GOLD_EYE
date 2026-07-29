@@ -37,9 +37,9 @@ def classify_segment(seg):
     # % de variation du prix
     pct = (last.close - first.close) / first.close * 100.0
     # Classification
-    if strength > 0.04 and slope > 0:
+    if strength > 0.025 and slope > 0:
         regime = "HAUSSIER"
-    elif strength > 0.04 and slope < 0:
+    elif strength > 0.025 and slope < 0:
         regime = "BAISSIER"
     else:
         regime = "RANGE"
