@@ -29,6 +29,13 @@ OANDA_API_TOKEN = os.getenv("OANDA_API_TOKEN", "")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
 OANDA_PRACTICE = os.getenv("OANDA_PRACTICE", "True") == "True"  # True = compte démo
 
+# --- BINANCE FUTURES (USD-M) ---
+# Cles depuis https://testnet.binancefuture.com/ (test) ou https://www.binance.com (live)
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_SECRET  = os.getenv("BINANCE_SECRET", "")
+BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "True") == "True"   # True = testnet, False = MAINNET (ATTENTION ARGENT REEL)
+BINANCE_LEVERAGE = int(os.getenv("BINANCE_LEVERAGE", "10"))
+
 # --- 2. TRADING SETTINGS ---
 # On transforme la string "EURUSD,GBPUSD" en liste ['EURUSD', 'GBPUSD']
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS_LIST", "AUDCAD,USDJPY,USDCHF,XAUUSD").split(",") if s.strip()]

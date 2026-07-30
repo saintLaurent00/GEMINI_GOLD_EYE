@@ -1,6 +1,5 @@
-MetaTrader5
+# Core (Linux/Colab compatible)
 pandas
-pandas_ta
 mplfinance
 matplotlib
 numpy
@@ -8,3 +7,9 @@ google-genai
 python-dotenv
 Pillow
 requests
+
+# Optionnel : indicateurs (fallback inclus dans les bots si absent)
+pandas_ta; platform_system != "Windows" and python_version < "3.12"
+
+# Windows only (MetaTrader5 terminal) ; ignoré sur Linux/Colab/Mac
+MetaTrader5; platform_system == "Windows"
