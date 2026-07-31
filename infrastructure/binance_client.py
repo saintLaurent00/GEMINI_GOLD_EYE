@@ -150,7 +150,8 @@ class BinanceFuturesClient:
         s = symbol.upper()
         if s in self._sym_info and not force:
             return self._sym_info[s]
-        info = self.exchange_info(s)
+        # Récupère TOUS les symboles (certains déploiements testnet ignorent le filtre ?symbol=)
+        info = self.exchange_info(None)
         sym = None
         for item in info.get("symbols", []):
             if item["symbol"] == s:
@@ -167,6 +168,8 @@ class BinanceFuturesClient:
             "tickSize": None,
             "minQty": None,
             "minNotional": None,
+            "marketStepSize": None,
+            "marketMinQty": None,
         }
         for f in sym.get("filters", []):
             t = f.get("filterType")
@@ -176,11 +179,23 @@ class BinanceFuturesClient:
             elif t == "PRICE_FILTER":
                 out["tickSize"] = float(f["tickSize"])
             elif t == "MARKET_LOT_SIZE":
-                # préfèrer la taille de marché si présente (quelques altcoins)
                 out["marketStepSize"] = float(f["stepSize"])
                 out["marketMinQty"] = float(f["minQty"])
             elif t == "MIN_NOTIONAL":
                 out["minNotional"] = float(f.get("notional", f.get("minNotional", 0)))
+        # Valeurs par défaut sûres si un filtre est absent
+        if out["stepSize"] is None:
+            out["stepSize"] = 10 ** (-out["quantityPrecision"])
+        if out["marketStepSize"] is None:
+            out["marketStepSize"] = out["stepSize"]
+        if out["tickSize"] is None:
+            out["tickSize"] = 10 ** (-out["pricePrecision"])
+        if out["minQty"] is None:
+            out["minQty"] = out["stepSize"]
+        if out["marketMinQty"] is None:
+            out["marketMinQty"] = out["minQty"]
+        if out["minNotional"] is None:
+            out["minNotional"] = 5.0
         self._sym_info[s] = out
         return out
 
@@ -285,34 +300,42 @@ class BinanceFuturesClient:
         )
 
     def place_sl(self, symbol: str, side: str, stop_price: float,
-                 reduce_only: bool = True) -> Dict:
-        """STOP_MARKET : déclenche un ordre de marché quand stopPrice est touché."""
+                 reduce_only: bool = True, quantity: float = None,
+                 working_type: str = "MARK_PRICE") -> Dict:
+        """STOP_MARKET. Par défaut closePosition=true (fermeture totale, le + robuste)."""
         sp = self.normalize_price(symbol, stop_price)
-        # Pour SL en one-way mode, on ne met PAS de qty (closePosition=true Binance >=v1).
-        # Mais tous les comptes ne l'acceptent pas, donc on passe la qty de la position.
-        pos = self.position(symbol)
-        qty = abs(float(pos["positionAmt"])) if pos else None
-        return self._new_order(
-            symbol, side, "STOP_MARKET",
-            stopPrice=sp,
-            closePosition="true" if qty is None else None,
-            quantity=qty if qty is not None else None,
-            reduceOnly="true" if reduce_only and qty is not None else None,
-        )
+        params = {
+            "symbol": symbol.upper(), "side": side.upper(),
+            "type": "STOP_MARKET", "stopPrice": sp,
+            "workingType": working_type,
+        }
+        if quantity is not None:
+            qty = self.normalize_quantity(symbol, abs(float(quantity)))
+            params["quantity"] = qty
+            if reduce_only:
+                params["reduceOnly"] = "true"
+        else:
+            params["closePosition"] = "true"
+        return self._post("/fapi/v1/order", params)
 
     def place_tp(self, symbol: str, side: str, tp_price: float,
-                 reduce_only: bool = True) -> Dict:
-        """TAKE_PROFIT_MARKET : idem SL mais sur TP."""
+                 reduce_only: bool = True, quantity: float = None,
+                 working_type: str = "MARK_PRICE") -> Dict:
+        """TAKE_PROFIT_MARKET. Par défaut closePosition=true."""
         tp = self.normalize_price(symbol, tp_price)
-        pos = self.position(symbol)
-        qty = abs(float(pos["positionAmt"])) if pos else None
-        return self._new_order(
-            symbol, side, "TAKE_PROFIT_MARKET",
-            stopPrice=tp,
-            closePosition="true" if qty is None else None,
-            quantity=qty if qty is not None else None,
-            reduceOnly="true" if reduce_only and qty is not None else None,
-        )
+        params = {
+            "symbol": symbol.upper(), "side": side.upper(),
+            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp,
+            "workingType": working_type,
+        }
+        if quantity is not None:
+            qty = self.normalize_quantity(symbol, abs(float(quantity)))
+            params["quantity"] = qty
+            if reduce_only:
+                params["reduceOnly"] = "true"
+        else:
+            params["closePosition"] = "true"
+        return self._post("/fapi/v1/order", params)
 
     def close_position(self, symbol: str) -> Optional[Dict]:
         pos = self.position(symbol)

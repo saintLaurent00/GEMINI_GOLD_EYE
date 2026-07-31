@@ -102,15 +102,17 @@ def _vwap(h: pd.Series, l: pd.Series, c: pd.Series, v: pd.Series) -> pd.Series:
     return cv_sum / v_sum
 
 # Mapping alias metier -> symbole Binance Futures USD-M.
-# Sur le testnet, tous les cross/marges ne sont pas actifs ; BTCUSDT et ETHUSDT le sont
-# systematiquement ; XAUUSDT l'est aussi sur le testnet public (Gold Perp).
+# Sur le testnet public (2026) : BTC/ETH/XRP/LTC/BCH + XAUUSDT (Gold TradFi) sont TRADING.
+# Les forex majeurs (EUR/USD, GBP/USD...) sont en deploiement TradFi sur le mainnet (2026).
+# XAUUSDT = Or vs USDT : c'est XAU/USD (gold), USDT-margined, 24/7.
 SYMBOL_ALIASES = {
-    "XAUUSD": "XAUUSDT",
-    "GOLD":   "XAUUSDT",
-    "BTCUSD": "BTCUSDT",
-    "ETHUSD": "ETHUSDT",
-    "EURUSD": "EURUSDT",
-    "GBPUSD": "GBPUSDT",
+    # Metaux (forex "groupe 1")
+    "XAUUSD": "XAUUSDT", "GOLD": "XAUUSDT",
+    "XAGUSD": "XAGUSDT", "SILVER": "XAGUSDT",
+    # Forex majeurs (TradFi perps, nommage Binance = BASEUSDT)
+    "EURUSD": "EURUSDT", "GBPUSD": "GBPUSDT", "AUDUSD": "AUDUSDT",
+    # Crypto (fallback)
+    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT",
 }
 
 
@@ -353,8 +355,8 @@ def execute_trade(bc: BinanceFuturesClient, symbol: str, side: str, entry: float
     1) Cancel tous les ordres ouverts existants (nettoyage)
     2) Calcule taille de position
     3) MARKET in
-    4) Place STOP_MARKET SL
-    5) Place TAKE_PROFIT_MARKET TP
+    4) Place STOP_MARKET SL  (closePosition=true, MARK_PRICE)
+    5) Place TAKE_PROFIT_MARKET TP (closePosition=true, MARK_PRICE)
     """
     side = side.upper()
     # Nettoyage prealable
@@ -363,25 +365,26 @@ def execute_trade(bc: BinanceFuturesClient, symbol: str, side: str, entry: float
     qty, sl_norm, notional = compute_qty(bc, symbol, side, entry, sl_price, risk_pct)
     tp_norm = bc.normalize_price(symbol, tp_price)
 
-    # Le SL doit etre du bon cote par rapport au sens
+    # Verification contre le prix LIVE (post-slippage/eventuel deplacement)
+    live_price = bc.price(symbol)
     if side == "BUY":
-        if not (sl_norm < entry < tp_norm):
-            raise BinanceApiError(-1, f"SL/TP du mauvais cote pour BUY: sl={sl_norm} < {entry} < {tp_norm} ?")
+        if not (sl_norm < live_price < tp_norm):
+            raise BinanceApiError(-1, f"SL/TP du mauvais cote pour BUY: sl={sl_norm} < live={live_price} < tp={tp_norm} ?")
         sl_side, tp_side = "SELL", "SELL"
     else:
-        if not (tp_norm < entry < sl_norm):
-            raise BinanceApiError(-1, f"SL/TP du mauvais cote pour SELL: tp={tp_norm} < {entry} < {sl_norm} ?")
+        if not (tp_norm < live_price < sl_norm):
+            raise BinanceApiError(-1, f"SL/TP du mauvais cote pour SELL: tp={tp_norm} < live={live_price} < sl={sl_norm} ?")
         sl_side, tp_side = "BUY", "BUY"
 
     # Affichage humain
-    sl_dist = abs(entry - sl_norm)
-    tp_dist = abs(entry - tp_norm)
+    sl_dist = abs(live_price - sl_norm)
+    tp_dist = abs(live_price - tp_norm)
     rr = tp_dist / sl_dist if sl_dist else 0
     balance = bc.balance_usdt()
     risk_amt = qty * sl_dist
     print(f"   🧮 sizing : qty={qty} notional≈{notional:.2f} USDT (levier applique cote exchange)")
-    print(f"   🧮 risque ≈ {risk_amt:.2f} USDT sur solde {balance:.2f} ({risk_pct}% demandé)")
-    print(f"   🧮 entry≈{entry:.5f}  SL={sl_norm:.5f}  TP={tp_norm:.5f}  R:R={rr:.2f}")
+    print(f"   🧮 risque ≈ {risk_amt:.2f} USDT sur solde {balance:.2f} ({risk_pct}% demande)")
+    print(f"   🧮 live={live_price:.5f}  SL={sl_norm:.5f} ({sl_dist:.2f})  TP={tp_norm:.5f} ({tp_dist:.2f})  R:R={rr:.2f}")
 
     if dry_run:
         print("   🧪 DRY-RUN : aucun ordre reel envoye.")
@@ -390,30 +393,37 @@ def execute_trade(bc: BinanceFuturesClient, symbol: str, side: str, entry: float
     # 3) MARKET entry
     print("   📤 Envoi ordre MARKET...")
     m = bc.market_order(symbol, side, qty)
-    print(f"   ✅ MARKET {side} rempli : orderId={m.get('orderId')}")
+    filled_qty = float(m.get("executedQty") or m.get("origQty") or qty)
+    print(f"   ✅ MARKET {side} rempli : orderId={m.get('orderId')} qty={filled_qty}")
 
-    # 4) SL
-    print("   📤 Placement SL (STOP_MARKET)...")
+    # Petite pause pour laisser le matching engine propager la position
+    time.sleep(0.7)
+
+    # 4) SL (STOP_MARKET closePosition, MARK_PRICE)
+    print("   📤 Placement SL (STOP_MARKET closePosition=true)...")
     try:
         s = bc.place_sl(symbol, sl_side, sl_norm)
-        print(f"   ✅ SL placé : orderId={s.get('orderId')} @ {sl_norm}")
+        print(f"   ✅ SL place : orderId={s.get('orderId')} @ {sl_norm}")
     except BinanceApiError as e:
         print(f"   ❌ ERREUR SL : {e} -> fermeture d'urgence de la position")
+        try: bc.cancel_open_orders(symbol)
+        except Exception: pass
         bc.close_position(symbol)
         raise
 
     # 5) TP
-    print("   📤 Placement TP (TAKE_PROFIT_MARKET)...")
+    print("   📤 Placement TP (TAKE_PROFIT_MARKET closePosition=true)...")
     try:
         tp = bc.place_tp(symbol, tp_side, tp_norm)
-        print(f"   ✅ TP placé : orderId={tp.get('orderId')} @ {tp_norm}")
+        print(f"   ✅ TP place : orderId={tp.get('orderId')} @ {tp_norm}")
     except BinanceApiError as e:
         print(f"   ❌ ERREUR TP : {e} -> annulation SL + fermeture position")
-        bc.cancel_open_orders(symbol)
+        try: bc.cancel_open_orders(symbol)
+        except Exception: pass
         bc.close_position(symbol)
         raise
 
-    return {"market": m, "sl": s, "tp": tp, "qty": qty}
+    return {"market": m, "sl": s, "tp": tp, "qty": filled_qty}
 
 
 # ============================================================
